@@ -1,5 +1,21 @@
 # etrobo_app_0 build/upload memo
 
+## チームrepoから使う場合
+
+`ET-` を `spike-rt` ルートとして clone した場合は、repo直下からそのまま実行できる。
+
+```sh
+cd <repo-root>
+make
+make up
+```
+
+`make up` はビルドしてから `asp.bin` を書き込む。ビルド済みのものだけ書き込む場合は次を使う。
+
+```sh
+make upload
+```
+
 ## ビルド
 
 おすすめ:
