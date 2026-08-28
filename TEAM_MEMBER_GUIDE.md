@@ -91,7 +91,7 @@ configuration check passed
 ```text
 sdk/workspace/asp.bin
 sdk/workspace/appdir
-sdk/workspace/etrobo_app_0/build/
+sdk/workspace/etrobo_nao/build/
 build/
 ```
 

@@ -6,6 +6,7 @@ APPL_CXXOBJS +=\
 AllSensors.o\
 BluetoothSender.o\
 BottleDetection.o\
+ChallengeCommandLogger.o\
 challenges.o\
 ColorDetector.o\
 ColorSensorService.o\

@@ -29,11 +29,19 @@ typedef struct {
   int result;
   double start_heading;
   double target_degrees;
+  double approach_target_degrees;
   double target_heading;
   double current_heading;
   double heading_error;
   double encoder_degrees;
+  double encoder_target_degrees;
+  double encoder_stop_degrees;
+  double left_encoder_degrees;
+  double right_encoder_degrees;
   double encoder_limit_degrees;
+  int left_turn_speed_deg_s;
+  int right_turn_speed_deg_s;
+  double encoder_sync_error_degrees;
 } turn_debug_t;
 
 typedef struct {
@@ -58,13 +66,10 @@ extern "C" {
 #endif
 
 void stop_motors(void);
+// 現在の左右エンコーダ位置を能動保持する。方向反転前の揺り戻し防止に使う。
+void hold_motors(void);
 void reset_straight_pid_heading(void);
 drive_result_t drive_straight_mm(int speed, int distance_mm);
-drive_result_t drive_straight_profile_mm(int start_speed, int cruise_speed,
-                                         int end_speed,
-                                         int accel_distance_mm,
-                                         int decel_distance_mm,
-                                         int distance_mm);
 drive_result_t drive_straight_mm_keep_speed(int speed, int distance_mm);
 drive_result_t drive_curve_mm(int left_speed, int right_speed,
                               int distance_mm);
@@ -73,6 +78,12 @@ drive_result_t drive_curve_mm_keep_speed(int left_speed, int right_speed,
 drive_result_t speed_up(int start_speed, int end_speed, int distance_mm);
 drive_result_t speed_down(int start_speed, int end_speed, int distance_mm);
 int turn(int speed, int degrees);
+// 左右エンコーダを主観測として減速旋回し、coast後にブレーキする。
+// ジャイロは終了判定に使わず、旋回後の短期直進方位を初期化する時だけ読む。
+int turn_by_encoder(int speed, int degrees);
+// 現在方位からの相対角ではなく、IMUの絶対目標方位へ最短方向で旋回する。
+// 難所の方位格子など、複数回の旋回誤差を累積させたくない処理で使用する。
+int turn_to_heading(int speed, double target_heading);
 turn_debug_t turn_get_debug(void);
 straight_debug_t straight_get_debug(void);
 

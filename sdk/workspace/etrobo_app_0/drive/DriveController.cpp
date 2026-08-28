@@ -58,14 +58,6 @@ struct StraightControlOutput {
   int right_speed_deg_s;
 };
 
-struct StraightSpeedProfile {
-  int start_speed_deg_s;
-  int cruise_speed_deg_s;
-  int end_speed_deg_s;
-  int accel_degrees;
-  int decel_degrees;
-};
-
 double straight_target_heading = 0.0;
 bool straight_target_heading_valid = false;
 bool straight_start_damping_pending = false;
@@ -154,6 +146,60 @@ double correctedTurnTargetDegrees(int degrees,
   return target_degrees;
 }
 
+// 主旋回だけを理想角より手前で終え、ブレーキ後の惰性で目標へ近づける。
+// 停止後判定と精密補正は元の理想角を使うため、補正値ぶん常に不足することはない。
+double turnApproachTargetDegrees(double ideal_target_degrees,
+                                 int direction_sign)
+{
+  const double pre_brake_degrees =
+    direction_sign > 0 ? etrobo_app::RIGHT_TURN_PRE_BRAKE_DEG :
+                         etrobo_app::LEFT_TURN_PRE_BRAKE_DEG;
+  const double approach_target_degrees =
+    ideal_target_degrees - pre_brake_degrees;
+  return approach_target_degrees > 0.0 ? approach_target_degrees : 0.0;
+}
+
+double encoderTurnScale(int direction_sign)
+{
+  return direction_sign > 0 ?
+    etrobo_app::CHALLENGE_ENCODER_RIGHT_TURN_SCALE :
+    etrobo_app::CHALLENGE_ENCODER_LEFT_TURN_SCALE;
+}
+
+double robotDegreesForEncoderTurn(double encoder_degrees)
+{
+  return encoder_degrees *
+         etrobo_app::WHEEL_DIAMETER_MM / etrobo_app::TREAD_MM;
+}
+
+// エンコーダ残量が減速区間へ入ったら、最低速度まで連続的に落とす。
+// 最後まで一定速度で回して強く止める方式より、停止時の車体揺れを小さくする。
+int encoderTurnSpeed(int max_speed_deg_s, double remaining_encoder_degrees)
+{
+  const int min_speed =
+    minimumInt(max_speed_deg_s,
+               etrobo_app::CHALLENGE_ENCODER_TURN_MIN_SPEED_DEG_S);
+  const double decel_window =
+    etrobo_app::CHALLENGE_ENCODER_TURN_DECEL_WINDOW_DEG;
+  if (decel_window <= 0.0 || remaining_encoder_degrees >= decel_window) {
+    return max_speed_deg_s;
+  }
+
+  const double progress = remaining_encoder_degrees / decel_window;
+  const double speed = min_speed + (max_speed_deg_s - min_speed) * progress;
+  return etrobo_app::clampMotorSpeed(speed);
+}
+
+// 目標直後はモーターをcoastにして回転エネルギーを逃がし、速度が落ちてから
+// ブレーキを掛ける。停止直後の強い制動による車体の揺り戻しを避ける。
+void coastThenBrakeTurn(const etrobo_app::DriveMotors &motors)
+{
+  etrobo_app::stopDriveMotors(motors);
+  dly_tsk(etrobo_app::CHALLENGE_ENCODER_TURN_COAST_TIME_US);
+  etrobo_app::brakeMotors(motors);
+  dly_tsk(etrobo_app::CHALLENGE_ENCODER_TURN_BRAKE_SETTLE_TIME_US);
+}
+
 double averageEncoderTravelDegrees(const etrobo_app::DriveMotors &motors,
                                    int32_t left_start,
                                    int32_t right_start)
@@ -162,6 +208,98 @@ double averageEncoderTravelDegrees(const etrobo_app::DriveMotors &motors,
   const int32_t right_delta = pup_motor_get_count(motors.right) - right_start;
   return (std::fabs(static_cast<double>(left_delta)) +
           std::fabs(static_cast<double>(right_delta))) / 2.0;
+}
+
+struct EncoderTurnTravel {
+  double left_degrees;
+  double right_degrees;
+  double average_degrees;
+};
+
+struct EncoderTurnWheelSpeeds {
+  int left_speed_deg_s;
+  int right_speed_deg_s;
+  double sync_error_degrees;
+};
+
+// 旋回中の左右移動量を同じ時点で読み、平均値と左右差をログへ残せる形にする。
+// 平均値だけでは片輪の滑りや引っ掛かりを見分けられないため、個別値も保持する。
+EncoderTurnTravel readEncoderTurnTravel(
+    const etrobo_app::DriveMotors &motors,
+    int32_t left_start,
+    int32_t right_start)
+{
+  EncoderTurnTravel travel = {};
+  travel.left_degrees = std::fabs(static_cast<double>(
+    pup_motor_get_count(motors.left) - left_start));
+  travel.right_degrees = std::fabs(static_cast<double>(
+    pup_motor_get_count(motors.right) - right_start));
+  travel.average_degrees =
+    (travel.left_degrees + travel.right_degrees) / 2.0;
+  return travel;
+}
+
+// 目標未到達の車輪には静止摩擦を越える最低速度を保証し、到達済みなら止める。
+// 左右を平均だけで止めず、片輪ずつ目標へ到達させるために使用する。
+int clampEncoderTurnWheelSpeed(int requested_speed_deg_s,
+                               int max_speed_deg_s,
+                               bool target_reached)
+{
+  if (target_reached) {
+    return 0;
+  }
+
+  const int min_speed =
+    minimumInt(max_speed_deg_s,
+               etrobo_app::CHALLENGE_ENCODER_TURN_MIN_SPEED_DEG_S);
+  if (requested_speed_deg_s < min_speed) {
+    return min_speed;
+  }
+  if (requested_speed_deg_s > max_speed_deg_s) {
+    return max_speed_deg_s;
+  }
+  return requested_speed_deg_s;
+}
+
+// 左右エンコーダ移動量の差を速度差へ変換する。
+// 先行輪を減速して遅れ輪を追い付かせ、旋回中の車体中心移動を抑える。
+EncoderTurnWheelSpeeds synchronizedEncoderTurnWheelSpeeds(
+    int base_speed_deg_s,
+    int max_speed_deg_s,
+    double target_encoder_degrees,
+    const EncoderTurnTravel &travel)
+{
+  EncoderTurnWheelSpeeds speeds = {};
+  speeds.sync_error_degrees =
+    travel.left_degrees - travel.right_degrees;
+  const double correction = clampDouble(
+    speeds.sync_error_degrees *
+      etrobo_app::CHALLENGE_ENCODER_TURN_SYNC_KP,
+    etrobo_app::CHALLENGE_ENCODER_TURN_SYNC_MAX_DEG_S);
+  const bool left_target_reached =
+    travel.left_degrees >= target_encoder_degrees;
+  const bool right_target_reached =
+    travel.right_degrees >= target_encoder_degrees;
+  speeds.left_speed_deg_s = clampEncoderTurnWheelSpeed(
+    static_cast<int>(base_speed_deg_s - correction),
+    max_speed_deg_s,
+    left_target_reached);
+  speeds.right_speed_deg_s = clampEncoderTurnWheelSpeed(
+    static_cast<int>(base_speed_deg_s + correction),
+    max_speed_deg_s,
+    right_target_reached);
+  return speeds;
+}
+
+void setSynchronizedEncoderTurnSpeeds(
+    const etrobo_app::DriveMotors &motors,
+    int direction_sign,
+    const EncoderTurnWheelSpeeds &speeds)
+{
+  etrobo_app::setMotorSpeeds(
+    motors,
+    direction_sign * speeds.left_speed_deg_s,
+    -direction_sign * speeds.right_speed_deg_s);
 }
 
 int signFromDistance(int distance)
@@ -183,13 +321,6 @@ int signFromDouble(double value)
 int interpolateSpeed(int start_speed_deg_s, int end_speed_deg_s,
                      double progress)
 {
-  if (progress < 0.0) {
-    progress = 0.0;
-  }
-  if (progress > 1.0) {
-    progress = 1.0;
-  }
-
   const double speed_deg_s =
     start_speed_deg_s +
     (end_speed_deg_s - start_speed_deg_s) * progress;
@@ -344,74 +475,7 @@ double straightStartCorrectionLimit(int base_speed_deg_s, int cycle)
     static_cast<double>(etrobo_app::STRAIGHT_PID_CORRECTION_RAMP_CYCLES);
   return etrobo_app::STRAIGHT_START_CORRECTION_LIMIT_DEG_S +
          (target_limit - etrobo_app::STRAIGHT_START_CORRECTION_LIMIT_DEG_S) *
-	         progress;
-}
-
-int selectProfileSpeed(const StraightSpeedProfile &profile,
-                       double travelled_degrees,
-                       int target_degrees)
-{
-  const double accel_degrees =
-    static_cast<double>(profile.accel_degrees);
-  const double decel_degrees =
-    static_cast<double>(profile.decel_degrees);
-  const double profile_degrees = accel_degrees + decel_degrees;
-
-  if (target_degrees <= 0) {
-    return 0;
-  }
-
-  if (profile_degrees > 0.0 && target_degrees <= profile_degrees) {
-    const double accel_ratio =
-      accel_degrees > 0.0 ? accel_degrees / profile_degrees : 0.0;
-    const double peak_position =
-      accel_degrees > 0.0 && decel_degrees > 0.0 ?
-      static_cast<double>(target_degrees) * accel_ratio :
-      0.0;
-    const double peak_progress =
-      static_cast<double>(target_degrees) / profile_degrees;
-    const int peak_speed =
-      interpolateSpeed(profile.start_speed_deg_s,
-                       profile.cruise_speed_deg_s,
-                       peak_progress);
-
-    if (peak_position > 0.0 && travelled_degrees < peak_position) {
-      return interpolateSpeed(profile.start_speed_deg_s,
-                              peak_speed,
-                              travelled_degrees / peak_position);
-    }
-
-    const double decel_position =
-      static_cast<double>(target_degrees) - peak_position;
-    if (decel_position <= 0.0) {
-      return interpolateSpeed(profile.start_speed_deg_s,
-                              profile.end_speed_deg_s,
-                              travelled_degrees /
-                              static_cast<double>(target_degrees));
-    }
-
-    const double remaining_degrees =
-      static_cast<double>(target_degrees) - travelled_degrees;
-    return interpolateSpeed(profile.end_speed_deg_s,
-                            peak_speed,
-                            remaining_degrees / decel_position);
-  }
-
-  if (accel_degrees > 0.0 && travelled_degrees < accel_degrees) {
-    return interpolateSpeed(profile.start_speed_deg_s,
-                            profile.cruise_speed_deg_s,
-                            travelled_degrees / accel_degrees);
-  }
-
-  const double remaining_degrees =
-    static_cast<double>(target_degrees) - travelled_degrees;
-  if (decel_degrees > 0.0 && remaining_degrees <= decel_degrees) {
-    return interpolateSpeed(profile.end_speed_deg_s,
-                            profile.cruise_speed_deg_s,
-                            remaining_degrees / decel_degrees);
-  }
-
-  return profile.cruise_speed_deg_s;
+         progress;
 }
 
 StraightControlOutput setPidStraightSpeed(
@@ -516,115 +580,6 @@ drive_result_t driveStraightByEncoder(int start_speed_deg_s,
       direction * applyMinimumStraightSpeed(interpolated_speed,
                                             start_speed_abs,
                                             end_speed_abs);
-    const int limited_speed_deg_s =
-      damp_straight_start ? applyStraightStartSpeedLimit(speed_deg_s, cycle) :
-                            speed_deg_s;
-    const double correction_limit_deg_s =
-      damp_straight_start ?
-      straightStartCorrectionLimit(limited_speed_deg_s, cycle) :
-      etrobo_app::STRAIGHT_PID_CORRECTION_LIMIT_DEG_S;
-    const StraightControlOutput output =
-      setPidStraightSpeed(motors,
-                          limited_speed_deg_s,
-                          target_heading,
-                          &straight_pid,
-                          correction_limit_deg_s);
-    debug.active = true;
-    debug.cycle = cycle;
-    debug.base_speed_deg_s = limited_speed_deg_s;
-    debug.left_speed_deg_s = output.left_speed_deg_s;
-    debug.right_speed_deg_s = output.right_speed_deg_s;
-    debug.result = DRIVE_RESULT_OK;
-    debug.current_heading = output.current_heading;
-    debug.heading_error = output.heading_error;
-    debug.correction_deg_s = output.correction;
-    debug.correction_limit_deg_s = correction_limit_deg_s;
-    debug.travelled_degrees = travelled_degrees;
-    publishStraightDebug(debug);
-    dly_tsk(etrobo_app::CONTROL_PERIOD_US);
-  }
-
-  brakeAndSettle(motors);
-  debug.active = false;
-  debug.result = DRIVE_RESULT_TIMEOUT;
-  debug.base_speed_deg_s = 0;
-  debug.left_speed_deg_s = 0;
-  debug.right_speed_deg_s = 0;
-  debug.current_heading = hub_imu_get_heading();
-  debug.heading_error = angleError(target_heading, debug.current_heading);
-  debug.correction_deg_s = 0.0;
-  debug.correction_limit_deg_s = 0.0;
-  debug.travelled_degrees =
-    averageEncoderTravelDegrees(motors, left_start, right_start);
-  publishStraightDebug(debug);
-  return DRIVE_RESULT_TIMEOUT;
-}
-
-drive_result_t driveStraightByEncoderProfile(const StraightSpeedProfile &profile,
-                                             int encoder_degrees,
-                                             bool brake_at_end)
-{
-  etrobo_app::DriveMotors motors;
-  if (!etrobo_app::getDriveMotors(&motors)) {
-    return DRIVE_RESULT_MOTOR_ERROR;
-  }
-
-  const int target_degrees = absoluteValue(encoder_degrees);
-  if (target_degrees == 0) {
-    etrobo_app::brakeMotors(motors);
-    return DRIVE_RESULT_OK;
-  }
-
-  const int direction = signFromDistance(encoder_degrees);
-  const int32_t left_start = pup_motor_get_count(motors.left);
-  const int32_t right_start = pup_motor_get_count(motors.right);
-  const double target_heading = getStraightPidTargetHeading();
-  const bool damp_straight_start = consumeStraightStartDamping();
-  HeadingPidState straight_pid = {0.0, 0.0, false};
-  straight_debug_t debug = {};
-  debug.active = true;
-  debug.cycle = 0;
-  debug.base_speed_deg_s = 0;
-  debug.left_speed_deg_s = 0;
-  debug.right_speed_deg_s = 0;
-  debug.result = DRIVE_RESULT_OK;
-  debug.target_heading = target_heading;
-  debug.current_heading = hub_imu_get_heading();
-  debug.heading_error = angleError(target_heading, debug.current_heading);
-  debug.correction_deg_s = 0.0;
-  debug.correction_limit_deg_s = 0.0;
-  debug.travelled_degrees = 0.0;
-  debug.target_degrees = target_degrees;
-  publishStraightDebug(debug);
-
-  for (int cycle = 0; cycle < etrobo_app::MAX_DRIVE_CYCLES; ++cycle) {
-    const double travelled_degrees =
-      averageEncoderTravelDegrees(motors, left_start, right_start);
-    if (travelled_degrees >= target_degrees) {
-      if (brake_at_end) {
-        brakeAndSettle(motors);
-      }
-      debug.active = false;
-      debug.cycle = cycle;
-      debug.base_speed_deg_s = 0;
-      debug.left_speed_deg_s = 0;
-      debug.right_speed_deg_s = 0;
-      debug.result = DRIVE_RESULT_OK;
-      debug.current_heading = hub_imu_get_heading();
-      debug.heading_error = angleError(target_heading, debug.current_heading);
-      debug.correction_deg_s = 0.0;
-      debug.correction_limit_deg_s = 0.0;
-      debug.travelled_degrees = travelled_degrees;
-      publishStraightDebug(debug);
-      return DRIVE_RESULT_OK;
-    }
-
-    const int profiled_speed =
-      selectProfileSpeed(profile, travelled_degrees, target_degrees);
-    const int speed_deg_s =
-      direction * applyMinimumStraightSpeed(profiled_speed,
-                                            profile.start_speed_deg_s,
-                                            profile.end_speed_deg_s);
     const int limited_speed_deg_s =
       damp_straight_start ? applyStraightStartSpeedLimit(speed_deg_s, cycle) :
                             speed_deg_s;
@@ -901,6 +856,142 @@ int runTurnPidUntilStable(const etrobo_app::DriveMotors &motors,
   return TURN_RESULT_TIMEOUT;
 }
 
+// 相対旋回と絶対方位旋回で共有する旋回制御本体。
+// target_degreesは開始時点から実際に回す角度、target_headingは成功後に
+// 直進PIDへ引き継ぐ絶対方位として役割を分けている。
+int runTurnControl(const etrobo_app::DriveMotors &motors,
+                   int speed,
+                   int command_degrees,
+                   double start_heading,
+                   double target_heading,
+                   double target_degrees,
+                   int direction_sign)
+{
+  const int base_speed =
+    applyMinimumTurnSpeed(
+      etrobo_app::clampMotorSpeed(absoluteValue(speed)));
+  const int32_t left_start = pup_motor_get_count(motors.left);
+  const int32_t right_start = pup_motor_get_count(motors.right);
+  const double approach_target_degrees =
+    turnApproachTargetDegrees(target_degrees, direction_sign);
+  const double encoder_limit =
+    encoderDegreesForTurn(target_degrees) * etrobo_app::ENCODER_LIMIT_MARGIN +
+    etrobo_app::ENCODER_LIMIT_EXTRA_DEG;
+  turn_debug_t debug = {};
+  debug.active = true;
+  debug.phase = 1;
+  debug.command_degrees = command_degrees;
+  debug.direction = direction_sign;
+  debug.max_speed_deg_s = base_speed;
+  debug.result = TURN_RESULT_OK;
+  debug.start_heading = start_heading;
+  debug.target_degrees = target_degrees;
+  debug.approach_target_degrees = approach_target_degrees;
+  debug.target_heading = target_heading;
+  debug.current_heading = start_heading;
+  debug.heading_error = direction_sign * approach_target_degrees;
+  debug.encoder_limit_degrees = encoder_limit;
+  publishTurnDebug(debug);
+
+  TurnProgressState turn_progress = {false, 0.0, 0.0};
+  int result = runTurnPidUntilStable(motors,
+                                     approach_target_degrees,
+                                     direction_sign,
+                                     base_speed,
+                                     left_start,
+                                     right_start,
+                                     encoder_limit,
+                                     etrobo_app::TURN_TIMEOUT_CYCLES,
+                                     1,
+                                     etrobo_app::TURN_APPROACH_TOLERANCE_DEG,
+                                     etrobo_app::TURN_APPROACH_STABLE_COUNT,
+                                     etrobo_app::MIN_TURN_SPEED_DEG_S,
+                                     false,
+                                     &turn_progress,
+                                     &debug);
+  brakeAndSettle(motors);
+
+  double settled_error =
+    turnProgressError(&turn_progress,
+                      hub_imu_get_heading(),
+                      target_degrees,
+                      direction_sign);
+  const bool approach_hard_failure =
+    result == TURN_RESULT_MOTOR_ERROR || result == TURN_RESULT_ENCODER_LIMIT;
+  if (!approach_hard_failure &&
+      std::fabs(settled_error) <=
+        etrobo_app::TURN_SETTLED_ACCEPTANCE_TOLERANCE_DEG) {
+    result = TURN_RESULT_OK;
+  }
+
+  // 走行継続可能な誤差内ではモーターを再始動しない。許容外の場合だけ
+  // 設定回数まで再旋回し、難所の小さな残差は続く直進PIDへ任せる。
+  for (int attempt = 0;
+       attempt < etrobo_app::TURN_SETTLED_CORRECTION_ATTEMPTS &&
+       result != TURN_RESULT_MOTOR_ERROR &&
+       result != TURN_RESULT_ENCODER_LIMIT &&
+       std::fabs(settled_error) >
+         etrobo_app::TURN_SETTLED_ACCEPTANCE_TOLERANCE_DEG;
+       ++attempt) {
+    const int correction_speed =
+      minimumInt(base_speed, etrobo_app::TURN_SETTLED_CORRECTION_SPEED_DEG_S);
+    result = runTurnPidUntilStable(
+      motors,
+      target_degrees,
+      direction_sign,
+      correction_speed,
+      left_start,
+      right_start,
+      encoder_limit,
+      etrobo_app::TURN_SETTLED_CORRECTION_CYCLES,
+      2 + attempt,
+      etrobo_app::GYRO_TOLERANCE_DEG,
+      etrobo_app::TURN_STABLE_COUNT,
+      etrobo_app::TURN_FINE_CORRECTION_MIN_SPEED_DEG_S,
+      true,
+      &turn_progress,
+      &debug);
+    brakeAndSettle(motors);
+
+    settled_error =
+      turnProgressError(&turn_progress,
+                        hub_imu_get_heading(),
+                        target_degrees,
+                        direction_sign);
+  }
+
+  // 制御ループのTIMEOUTでも停止位置が実用範囲なら走行を継続する。
+  // モーター異常とエンコーダ上限は安全上の失敗なので上書きしない。
+  const bool final_hard_failure =
+    result == TURN_RESULT_MOTOR_ERROR || result == TURN_RESULT_ENCODER_LIMIT;
+  if (!final_hard_failure) {
+    result = std::fabs(settled_error) <=
+               etrobo_app::TURN_SETTLED_ACCEPTANCE_TOLERANCE_DEG ?
+             TURN_RESULT_OK : TURN_RESULT_TIMEOUT;
+  }
+
+  debug.active = false;
+  debug.current_heading = hub_imu_get_heading();
+  debug.heading_error =
+    turnProgressError(&turn_progress,
+                      debug.current_heading,
+                      target_degrees,
+                      direction_sign);
+  debug.encoder_degrees =
+    averageEncoderTravelDegrees(motors, left_start, right_start);
+  debug.turn_speed_deg_s = 0;
+  debug.result = result;
+  publishTurnDebug(debug);
+
+  if (result == TURN_RESULT_OK) {
+    setStraightPidTargetHeading(target_heading);
+    requestStraightStartDamping();
+  } else {
+    reset_straight_pid_heading();
+  }
+  return result;
+}
+
 }  // namespace
 
 void stop_motors(void)
@@ -908,6 +999,17 @@ void stop_motors(void)
   etrobo_app::DriveMotors motors;
   if (etrobo_app::getDriveMotors(&motors)) {
     etrobo_app::brakeMotors(motors);
+  }
+}
+
+void hold_motors(void)
+{
+  etrobo_app::DriveMotors motors;
+  if (etrobo_app::getDriveMotors(&motors)) {
+    // brakeは受動制動だが、holdは呼出時のエンコーダ位置を能動的に維持する。
+    // 後退停止直後に機体が前へ戻り、実後退距離が短くなる現象を抑える。
+    pup_motor_hold(motors.left);
+    pup_motor_hold(motors.right);
   }
 }
 
@@ -921,25 +1023,6 @@ drive_result_t drive_straight_mm(int speed, int distance_mm)
   const int encoder_degrees =
     static_cast<int>(etrobo_app::mmToEncoderDegrees(distance_mm));
   return driveStraightByEncoder(speed, speed, encoder_degrees, true);
-}
-
-drive_result_t drive_straight_profile_mm(int start_speed, int cruise_speed,
-                                         int end_speed,
-                                         int accel_distance_mm,
-                                         int decel_distance_mm,
-                                         int distance_mm)
-{
-  StraightSpeedProfile profile = {};
-  profile.start_speed_deg_s = absoluteValue(start_speed);
-  profile.cruise_speed_deg_s = absoluteValue(cruise_speed);
-  profile.end_speed_deg_s = absoluteValue(end_speed);
-  profile.accel_degrees = static_cast<int>(
-    etrobo_app::mmToEncoderDegrees(absoluteValue(accel_distance_mm)));
-  profile.decel_degrees = static_cast<int>(
-    etrobo_app::mmToEncoderDegrees(absoluteValue(decel_distance_mm)));
-  const int encoder_degrees =
-    static_cast<int>(etrobo_app::mmToEncoderDegrees(distance_mm));
-  return driveStraightByEncoderProfile(profile, encoder_degrees, true);
 }
 
 drive_result_t drive_straight_mm_keep_speed(int speed, int distance_mm)
@@ -998,121 +1081,214 @@ int turn(int speed, int degrees)
     return TURN_RESULT_OK;
   }
 
-  const int base_speed =
-    applyMinimumTurnSpeed(
-      etrobo_app::clampMotorSpeed(absoluteValue(speed)));
   const double start_heading = hub_imu_get_heading();
   const double target_heading =
     start_heading + turnSign(direction) * target_degrees;
   const int direction_sign = turnSign(direction);
+  return runTurnControl(motors,
+                        speed,
+                        degrees,
+                        start_heading,
+                        target_heading,
+                        target_degrees,
+                        direction_sign);
+}
+
+int turn_by_encoder(int speed, int degrees)
+{
+  etrobo_app::DriveMotors motors;
+  if (!etrobo_app::getDriveMotors(&motors)) {
+    return TURN_RESULT_MOTOR_ERROR;
+  }
+
+  const int direction_sign = degrees < 0 ? -1 : 1;
+  const double ideal_robot_degrees =
+    std::fabs(static_cast<double>(degrees));
+  if (ideal_robot_degrees <= 0.0) {
+    reset_straight_pid_heading();
+    return TURN_RESULT_OK;
+  }
+
+  const int max_speed =
+    applyMinimumTurnSpeed(
+      etrobo_app::clampMotorSpeed(absoluteValue(speed)));
+  const double encoder_scale = encoderTurnScale(direction_sign);
+  const double target_encoder_degrees =
+    encoderDegreesForTurn(ideal_robot_degrees) * encoder_scale;
+  const double encoder_limit =
+    target_encoder_degrees * etrobo_app::ENCODER_LIMIT_MARGIN +
+    etrobo_app::ENCODER_LIMIT_EXTRA_DEG;
   const int32_t left_start = pup_motor_get_count(motors.left);
   const int32_t right_start = pup_motor_get_count(motors.right);
-  const double encoder_limit =
-    encoderDegreesForTurn(target_degrees) * etrobo_app::ENCODER_LIMIT_MARGIN +
-    etrobo_app::ENCODER_LIMIT_EXTRA_DEG;
+  const double start_heading = hub_imu_get_heading();
+
   turn_debug_t debug = {};
   debug.active = true;
-  debug.phase = 1;
+  debug.phase = 10;
   debug.command_degrees = degrees;
   debug.direction = direction_sign;
-  debug.max_speed_deg_s = base_speed;
+  debug.max_speed_deg_s = max_speed;
   debug.result = TURN_RESULT_OK;
   debug.start_heading = start_heading;
-  debug.target_degrees = target_degrees;
-  debug.target_heading = target_heading;
+  debug.target_degrees = ideal_robot_degrees;
+  debug.approach_target_degrees = ideal_robot_degrees * encoder_scale;
+  debug.target_heading = start_heading + direction_sign * ideal_robot_degrees;
   debug.current_heading = start_heading;
-  debug.heading_error = direction_sign * target_degrees;
+  debug.heading_error =
+    direction_sign * debug.approach_target_degrees;
+  debug.encoder_target_degrees = target_encoder_degrees;
   debug.encoder_limit_degrees = encoder_limit;
   publishTurnDebug(debug);
 
-  TurnProgressState turn_progress = {false, 0.0, 0.0};
-  int result = runTurnPidUntilStable(motors,
-                                     target_degrees,
-                                     direction_sign,
-                                     base_speed,
-                                     left_start,
-                                     right_start,
-                                     encoder_limit,
-                                     etrobo_app::TURN_TIMEOUT_CYCLES,
-                                     1,
-                                     etrobo_app::TURN_APPROACH_TOLERANCE_DEG,
-                                     etrobo_app::TURN_APPROACH_STABLE_COUNT,
-                                     etrobo_app::MIN_TURN_SPEED_DEG_S,
-                                     false,
-                                     &turn_progress,
-                                     &debug);
-  brakeAndSettle(motors);
+  for (int cycle = 0; cycle < etrobo_app::TURN_TIMEOUT_CYCLES; ++cycle) {
+    const EncoderTurnTravel travel =
+      readEncoderTurnTravel(motors, left_start, right_start);
+    const double encoder_degrees = travel.average_degrees;
+    const double remaining_encoder_degrees =
+      target_encoder_degrees - encoder_degrees;
+    const double left_remaining_encoder_degrees =
+      target_encoder_degrees - travel.left_degrees;
+    const double right_remaining_encoder_degrees =
+      target_encoder_degrees - travel.right_degrees;
+    const bool left_target_reached =
+      left_remaining_encoder_degrees <= 0.0;
+    const bool right_target_reached =
+      right_remaining_encoder_degrees <= 0.0;
 
-  double settled_error =
-    turnProgressError(&turn_progress,
-                      hub_imu_get_heading(),
-                      target_degrees,
-                      direction_sign);
-  if (std::fabs(settled_error) <= etrobo_app::GYRO_TOLERANCE_DEG) {
-    result = TURN_RESULT_OK;
-  }
-
-  for (int attempt = 0;
-       attempt < etrobo_app::TURN_SETTLED_CORRECTION_ATTEMPTS &&
-       result != TURN_RESULT_MOTOR_ERROR &&
-       result != TURN_RESULT_ENCODER_LIMIT &&
-       std::fabs(settled_error) > etrobo_app::GYRO_TOLERANCE_DEG;
-       ++attempt) {
-    const int correction_speed =
-      minimumInt(base_speed, etrobo_app::TURN_SETTLED_CORRECTION_SPEED_DEG_S);
-    result = runTurnPidUntilStable(
-      motors,
-      target_degrees,
-      direction_sign,
-      correction_speed,
-      left_start,
-      right_start,
-      encoder_limit,
-      etrobo_app::TURN_SETTLED_CORRECTION_CYCLES,
-      2 + attempt,
-      etrobo_app::GYRO_TOLERANCE_DEG,
-      etrobo_app::TURN_STABLE_COUNT,
-      etrobo_app::TURN_FINE_CORRECTION_MIN_SPEED_DEG_S,
-      true,
-      &turn_progress,
-      &debug);
-    brakeAndSettle(motors);
-
-    settled_error =
-      turnProgressError(&turn_progress,
-                        hub_imu_get_heading(),
-                        target_degrees,
-                        direction_sign);
-    if (std::fabs(settled_error) <= etrobo_app::GYRO_TOLERANCE_DEG) {
-      result = TURN_RESULT_OK;
+    // 平均が目標未満でも片輪だけが大きく回る故障・空転を安全上限で止める。
+    if (travel.left_degrees >= encoder_limit ||
+        travel.right_degrees >= encoder_limit) {
+      debug.encoder_stop_degrees = encoder_degrees;
+      coastThenBrakeTurn(motors);
+      const EncoderTurnTravel final_travel =
+        readEncoderTurnTravel(motors, left_start, right_start);
+      debug.active = false;
+      debug.current_heading = hub_imu_get_heading();
+      debug.heading_error = direction_sign * robotDegreesForEncoderTurn(
+        target_encoder_degrees - final_travel.average_degrees);
+      debug.encoder_degrees = final_travel.average_degrees;
+      debug.left_encoder_degrees = final_travel.left_degrees;
+      debug.right_encoder_degrees = final_travel.right_degrees;
+      debug.encoder_sync_error_degrees =
+        final_travel.left_degrees - final_travel.right_degrees;
+      debug.turn_speed_deg_s = 0;
+      debug.left_turn_speed_deg_s = 0;
+      debug.right_turn_speed_deg_s = 0;
+      debug.result = TURN_RESULT_ENCODER_LIMIT;
+      publishTurnDebug(debug);
+      reset_straight_pid_heading();
+      return TURN_RESULT_ENCODER_LIMIT;
     }
+
+    if (left_target_reached && right_target_reached) {
+      // 左右平均ではなく両輪の到達を確認し、片輪不足による中心移動を残さない。
+      // 指令を切った時点と完全停止後を分け、coast中の惰性回転量も測定する。
+      debug.encoder_stop_degrees = encoder_degrees;
+      coastThenBrakeTurn(motors);
+      const EncoderTurnTravel final_travel =
+        readEncoderTurnTravel(motors, left_start, right_start);
+      debug.active = false;
+      debug.current_heading = hub_imu_get_heading();
+      debug.heading_error = direction_sign * robotDegreesForEncoderTurn(
+        target_encoder_degrees - final_travel.average_degrees);
+      debug.encoder_degrees = final_travel.average_degrees;
+      debug.left_encoder_degrees = final_travel.left_degrees;
+      debug.right_encoder_degrees = final_travel.right_degrees;
+      debug.encoder_sync_error_degrees =
+        final_travel.left_degrees - final_travel.right_degrees;
+      debug.turn_speed_deg_s = 0;
+      debug.left_turn_speed_deg_s = 0;
+      debug.right_turn_speed_deg_s = 0;
+      debug.result = TURN_RESULT_OK;
+      publishTurnDebug(debug);
+
+      // 絶対ジャイロ方位へ戻そうとせず、旋回直後の値を次区間の短期保持方位にする。
+      reset_straight_pid_heading();
+      requestStraightStartDamping();
+      return TURN_RESULT_OK;
+    }
+
+    // 遅れている側の残量で共通速度を減速し、同期補正で左右速度を分ける。
+    const double profile_remaining_encoder_degrees =
+      left_remaining_encoder_degrees > right_remaining_encoder_degrees ?
+      left_remaining_encoder_degrees : right_remaining_encoder_degrees;
+    const int turn_speed =
+      encoderTurnSpeed(max_speed, profile_remaining_encoder_degrees);
+    const EncoderTurnWheelSpeeds wheel_speeds =
+      synchronizedEncoderTurnWheelSpeeds(
+        turn_speed, max_speed, target_encoder_degrees, travel);
+    debug.active = true;
+    debug.current_heading = hub_imu_get_heading();
+    debug.heading_error = direction_sign *
+      robotDegreesForEncoderTurn(remaining_encoder_degrees);
+    debug.encoder_degrees = encoder_degrees;
+    debug.left_encoder_degrees = travel.left_degrees;
+    debug.right_encoder_degrees = travel.right_degrees;
+    debug.turn_speed_deg_s = direction_sign * turn_speed;
+    debug.left_turn_speed_deg_s =
+      direction_sign * wheel_speeds.left_speed_deg_s;
+    debug.right_turn_speed_deg_s =
+      -direction_sign * wheel_speeds.right_speed_deg_s;
+    debug.encoder_sync_error_degrees = wheel_speeds.sync_error_degrees;
+    debug.result = TURN_RESULT_OK;
+    publishTurnDebug(debug);
+    setSynchronizedEncoderTurnSpeeds(motors, direction_sign, wheel_speeds);
+    dly_tsk(etrobo_app::CONTROL_PERIOD_US);
   }
 
-  if (result == TURN_RESULT_OK &&
-      std::fabs(settled_error) > etrobo_app::GYRO_TOLERANCE_DEG) {
-    result = TURN_RESULT_TIMEOUT;
-  }
-
+  const EncoderTurnTravel command_stop_travel =
+    readEncoderTurnTravel(motors, left_start, right_start);
+  debug.encoder_stop_degrees = command_stop_travel.average_degrees;
+  coastThenBrakeTurn(motors);
+  const EncoderTurnTravel final_travel =
+    readEncoderTurnTravel(motors, left_start, right_start);
   debug.active = false;
   debug.current_heading = hub_imu_get_heading();
-  debug.heading_error =
-    turnProgressError(&turn_progress,
-                      debug.current_heading,
-                      target_degrees,
-                      direction_sign);
-  debug.encoder_degrees =
-    averageEncoderTravelDegrees(motors, left_start, right_start);
+  debug.encoder_degrees = final_travel.average_degrees;
+  debug.left_encoder_degrees = final_travel.left_degrees;
+  debug.right_encoder_degrees = final_travel.right_degrees;
+  debug.encoder_sync_error_degrees =
+    final_travel.left_degrees - final_travel.right_degrees;
+  debug.heading_error = direction_sign * robotDegreesForEncoderTurn(
+    target_encoder_degrees - debug.encoder_degrees);
   debug.turn_speed_deg_s = 0;
-  debug.result = result;
+  debug.left_turn_speed_deg_s = 0;
+  debug.right_turn_speed_deg_s = 0;
+  debug.result = TURN_RESULT_TIMEOUT;
   publishTurnDebug(debug);
+  reset_straight_pid_heading();
+  return TURN_RESULT_TIMEOUT;
+}
 
-  if (result == TURN_RESULT_OK) {
-    setStraightPidTargetHeading(target_heading);
-    requestStraightStartDamping();
-  } else {
-    reset_straight_pid_heading();
+int turn_to_heading(int speed, double target_heading)
+{
+  etrobo_app::DriveMotors motors;
+  if (!etrobo_app::getDriveMotors(&motors)) {
+    return TURN_RESULT_MOTOR_ERROR;
   }
-  return result;
+
+  const double start_heading = hub_imu_get_heading();
+  const double signed_target_degrees =
+    angleError(target_heading, start_heading);
+  const double target_degrees = std::fabs(signed_target_degrees);
+  if (target_degrees <= etrobo_app::GYRO_TOLERANCE_DEG) {
+    // 既に格子方位内ならモーターを動かさず、次の直進目標だけを厳密値へ揃える。
+    setStraightPidTargetHeading(target_heading);
+    return TURN_RESULT_OK;
+  }
+
+  // 絶対方位では左右の角度倍率やオフセットを適用しない。
+  // それらを足すと、補正後の目標が方位格子そのものから外れるためである。
+  const int direction_sign = signFromDouble(signed_target_degrees);
+  const int command_degrees =
+    static_cast<int>(std::round(signed_target_degrees));
+  return runTurnControl(motors,
+                        speed,
+                        command_degrees,
+                        start_heading,
+                        target_heading,
+                        target_degrees,
+                        direction_sign);
 }
 
 turn_debug_t turn_get_debug(void)

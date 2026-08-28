@@ -1,4 +1,4 @@
-APP ?= etrobo_app_0
+APP ?= etrobo_nao
 APP_DIR := sdk/workspace/$(APP)
 
 .DEFAULT_GOAL := build

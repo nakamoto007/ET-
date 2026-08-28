@@ -25,15 +25,15 @@ sdk/workspace/*
 !sdk/workspace/sample01/**
 !sdk/workspace/etrobo_app
 !sdk/workspace/etrobo_app/**
-!sdk/workspace/etrobo_app_0
-!sdk/workspace/etrobo_app_0/**
+!sdk/workspace/etrobo_nao
+!sdk/workspace/etrobo_nao/**
 !sdk/workspace/Makefile
 
 # Ignore build directories under each sdk/workspace project folder
 sdk/workspace/*/build/
 sdk/workspace/*/build/**
-sdk/workspace/etrobo_app_0/.vscode/
-sdk/workspace/etrobo_app_0/.vscode/**
+sdk/workspace/etrobo_nao/.vscode/
+sdk/workspace/etrobo_nao/.vscode/**
 
 # Ignore everything under tools except docker and requirements.txt
 tools/*

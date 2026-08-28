@@ -45,7 +45,12 @@ typedef struct {
   float angular_velocity_x;
   float angular_velocity_y;
   float angular_velocity_z;
+  // SPIKE側の3D heading。アプリ独自の時間比例ドリフト補正は未適用。
+  float raw_heading;
+  // 走行制御が使用するheading。独自補正無効時はraw_headingと同じ系統。
   float heading;
+  // アプリ独自補正で差し引く推定ドリフト量 [deg/min]。
+  float heading_drift_rate;
   float temperature;
 } imu_values_t;
 

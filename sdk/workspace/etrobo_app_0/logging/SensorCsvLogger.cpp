@@ -2,6 +2,7 @@
 #include "SensorCsvLogger.h"
 #include "AllSensors.h"
 #include "BluetoothSender.h"
+#include "ChallengeCommandLogger.h"
 #include "ColorDetector.h"
 #include "DriveController.h"
 #include "LineTraceController.h"
@@ -65,7 +66,7 @@ void sensorCsvLoggerPrintTurnRow(int elapsed_ms)
   char line[256];
   const int length = snprintf(
       line, sizeof(line),
-      "turn,%d,%lu,%d,%d,%d,%d,%d,%.2f,%.2f,%.2f,%.2f,%d,%d,%d,%.1f,%.1f\n",
+      "turn,%d,%lu,%d,%d,%d,%d,%d,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%d,%d,%d,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%d,%d,%.1f\n",
       elapsed_ms,
       static_cast<unsigned long>(turn_debug.update_count),
       boolToInt(turn_debug.active),
@@ -73,6 +74,8 @@ void sensorCsvLoggerPrintTurnRow(int elapsed_ms)
       turn_debug.command_degrees,
       turn_debug.direction,
       turn_debug.max_speed_deg_s,
+      turn_debug.target_degrees,
+      turn_debug.approach_target_degrees,
       turn_debug.start_heading,
       turn_debug.target_heading,
       turn_debug.current_heading,
@@ -81,7 +84,14 @@ void sensorCsvLoggerPrintTurnRow(int elapsed_ms)
       turn_debug.stable_count,
       turn_debug.result,
       turn_debug.encoder_degrees,
-      turn_debug.encoder_limit_degrees);
+      turn_debug.encoder_target_degrees,
+      turn_debug.encoder_stop_degrees,
+      turn_debug.left_encoder_degrees,
+      turn_debug.right_encoder_degrees,
+      turn_debug.encoder_limit_degrees,
+      turn_debug.left_turn_speed_deg_s,
+      turn_debug.right_turn_speed_deg_s,
+      turn_debug.encoder_sync_error_degrees);
   if (length > 0 && static_cast<size_t>(length) < sizeof(line)) {
     (void)bluetooth_sender_send(line);
   }
@@ -96,25 +106,31 @@ void sensor_csv_logger_print_header(void)
           "ms,dok,lc,rc,ls,rs,lp,rp,"
           "cok,ref,nref,r,g,b,h,s,v,v8,det,"
           "lt_ref,lt_nref,lt_err,lt_der,lt_base,lt_line,lt_imu,lt_turn,lt_lp,lt_rp,edge,lt_mode,lt_curve,lt_entry,"
-          "fok,fn,imu,imucal,ax,ay,az,gz,hd\n");
+          "fok,fn,imu,imucal,ax,ay,az,gz,hd,rhd,hdrate,hdcorr\n");
   (void)bluetooth_sender_send(
-          "kind,ms,tseq,tact,tphase,tcmd,tdir,tmax,tstart,ttgt,thd,terr,tspd,tst,tres,tenc,telim\n");
+          "kind,ms,tseq,tact,tphase,tcmd,tdir,tmax,tideal,tapp,tstart,ttgt,thd,terr,tspd,tst,tres,tenc,tetgt,tecut,tlenc,trenc,telim,tls,trs,tesync\n");
   (void)bluetooth_sender_send(
           "kind,ms,sseq,sact,scyc,sbase,sleft,sright,sres,stgt,shd,serr,scorr,slim,senc,stenc\n");
+  (void)bluetooth_sender_send(
+          "kind,crun,cseq,ccmd,ccount,ctmm,ctdeg,cbf,cbcomp,cfcomp,cstart,cdur,cmok,cls,crs,cle,cre,cld,crd,chs,che,chd,chtgt,cres,cdrop\n");
 }
 
 void sensor_csv_logger_print_row(int elapsed_ms)
 {
+  // 命令境界ログを通常の周期ログより先に送り、送信混雑時も調整用データを優先する。
+  etrobo_app::challengeCommandLoggerFlush();
+
   const all_sensor_values_t sensors = get_all_sensor_values();
   const color_detector_status_t color_detection = color_detector_get_status();
   const line_tracer_debug_t line_trace = LineTracer_GetDebug();
-  char line[256];
+  // BluetoothSenderが許可する256byteと終端NULを両立する。
+  char line[257];
   const int length = snprintf(
       line, sizeof(line),
       "%d,%d,%ld,%ld,%ld,%ld,%ld,%ld,"
       "%d,%ld,%ld,%u,%u,%u,%u,%u,%u,%u,%d,"
       "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-      "%d,%.3f,%d,%d,%.3f,%.3f,%.3f,%.3f,%.3f\n",
+      "%d,%.3f,%d,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d\n",
       elapsed_ms,
       boolToInt(sensors.drive_motors.drive_motors_ready),
       static_cast<long>(sensors.drive_motors.left_motor_count),
@@ -158,7 +174,10 @@ void sensor_csv_logger_print_row(int elapsed_ms)
       sensors.imu.acceleration_y,
       sensors.imu.acceleration_z,
       sensors.imu.angular_velocity_z,
-      sensors.imu.heading);
+      sensors.imu.heading,
+      sensors.imu.raw_heading,
+      sensors.imu.heading_drift_rate,
+      boolToInt(etrobo_app::ENABLE_CUSTOM_HEADING_DRIFT_CORRECTION));
   if (length > 0 && static_cast<size_t>(length) < sizeof(line)) {
     (void)bluetooth_sender_send(line);
   }

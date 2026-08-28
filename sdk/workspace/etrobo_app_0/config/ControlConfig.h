@@ -9,7 +9,10 @@ const int CONTROL_PERIOD_US = 10 * 1000;
 const double CONTROL_PERIOD_SEC = 0.01;
 // 起動時のIMU取り付け角補正で平均するサンプル数。
 const int CALIBRATION_SAMPLES = 100;
-// 姿勢キャリブレーション後、停止したままIMU headingの流れを測る時間。
+// falseではSPIKE側のheadingだけを使い、独自の時間比例ドリフト補正を止める。
+// 10秒の2点測定がノイズを過大評価して方位基準を回していないか確認する設定。
+const bool ENABLE_CUSTOM_HEADING_DRIFT_CORRECTION = false;
+// 独自補正が有効な場合に、停止したままIMU headingの流れを測る時間。
 const int IMU_DRIFT_CALIBRATION_TIME_US = 10 * 1000 * 1000;
 // IMUが準備完了になるまで待つ最大リトライ回数。
 const int IMU_READY_RETRIES = 100;
@@ -28,20 +31,29 @@ const int MIN_STRAIGHT_SPEED_DEG_S = 120;
 // 旋回時にモーターが動き続ける最低速度 [deg/s]。小さすぎる速度を防ぐ。
 const int MIN_TURN_SPEED_DEG_S = 40;
 
-// 通常旋回を終了し、停止後の精密補正へ渡す角度誤差。
-const double TURN_APPROACH_TOLERANCE_DEG = 0.5;
+// 通常旋回を終了する角度誤差。静止摩擦が大きい機体で微小な往復旋回を避ける。
+const double TURN_APPROACH_TOLERANCE_DEG = 1.0;
 // 通常旋回で目標付近に入った状態を完了とみなすまでの連続周期数。
 const int TURN_APPROACH_STABLE_COUNT = 3;
-// ジャイロ角度が最終目標に到達したとみなす許容誤差。
-const double GYRO_TOLERANCE_DEG = 0.2;
+// 左旋回の主旋回を理想角より何度手前でブレーキするか。
+// 左旋回には系統的な行き過ぎが未確認なので、現在は補正しない。
+const double LEFT_TURN_PRE_BRAKE_DEG = 0.0;
+// 右旋回の主旋回を理想角より何度手前でブレーキするか。
+// 4度補正後も残った時計回りの行き過ぎを受け、段階的に7度へ強めた。
+const double RIGHT_TURN_PRE_BRAKE_DEG = 7.0;
+// 停止後補正が目標へ到達したとみなす角度誤差。
+const double GYRO_TOLERANCE_DEG = 1.5;
+// 通常旋回の停止後、そのまま走行を続けられる角度誤差。
+// この範囲ではモーターを再始動せず、残差は次の直進PIDで理想方位へ戻す。
+const double TURN_SETTLED_ACCEPTANCE_TOLERANCE_DEG = 3.0;
 // 精密補正は目標角度内に入ったら即停止し、停止後の再測定で最終判定する。
 const int TURN_STABLE_COUNT = 1;
-// 旋回停止後に角度が外れていた場合、低速で合わせ直す最大周期数。
-const int TURN_SETTLED_CORRECTION_CYCLES = 250;
+// 旋回停止後に許容外だった場合、1回だけ合わせ直す最大周期数。
+const int TURN_SETTLED_CORRECTION_CYCLES = 100;
 // 旋回停止後の合わせ直しで使う速度上限 [deg/s]。
 const int TURN_SETTLED_CORRECTION_SPEED_DEG_S = 50;
-// 精密補正を繰り返す最大回数。
-const int TURN_SETTLED_CORRECTION_ATTEMPTS = 5;
+// 静止摩擦とバックラッシュによる往復を避けるため、停止後補正は1回に限る。
+const int TURN_SETTLED_CORRECTION_ATTEMPTS = 1;
 // 精密補正時だけ使う最低旋回速度 [deg/s]。低すぎると静止摩擦で動かない。
 const int TURN_FINE_CORRECTION_MIN_SPEED_DEG_S = 50;
 // この角度より外側では連続補正し、止めすぎによる動き出し不良を防ぐ。

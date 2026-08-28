@@ -65,7 +65,9 @@ void readImuValues(imu_values_t *values)
   values->angular_velocity_x = angular_velocity[0];
   values->angular_velocity_y = angular_velocity[1];
   values->angular_velocity_z = angular_velocity[2];
+  values->raw_heading = hub_imu_get_raw_heading();
   values->heading = hub_imu_get_heading();
+  values->heading_drift_rate = hub_imu_get_heading_drift_rate();
   values->temperature = hub_imu_get_temperature();
 }
 

@@ -207,6 +207,14 @@ void calibrateRobotPoseAndDrift(void)
   calibrate_robot_pose();
   stop_motors();
 
+  // SPIKE側のIMU補正だけで走る比較条件。独自補正を無効にすると、
+  // 2点測定の誤差による架空の方位回転を制御へ持ち込まず、待ち時間も省く。
+  if (!etrobo_app::ENABLE_CUSTOM_HEADING_DRIFT_CORRECTION) {
+    reset_straight_pid_heading();
+    showImuDriftResult(0.0);
+    return;
+  }
+
   const double start_heading = hub_imu_get_raw_heading();
   dly_tsk(etrobo_app::IMU_DRIFT_CALIBRATION_TIME_US);
   const double end_heading = hub_imu_get_raw_heading();

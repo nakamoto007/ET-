@@ -24,7 +24,7 @@
 | `LineTracer/` | カラーセンサー反射値を使ったライントレース本体と、距離指定で呼ぶ窓口。 |
 | `control/` | 起動、ロボット初期化、状態管理、周期タスク制御、センサー昇降。 |
 | `sensors/` | カラー、色判定、フォース、IMU、超音波、全センサー一括取得。 |
-| `logging/` | Bluetooth送信とCSVログ。通常センサー行、ライントレースデバッグ、直進PIDデバッグ、旋回デバッグを出す。 |
+| `logging/` | Bluetooth送信とCSVログ。通常センサー行、ライントレース、直進PID、旋回、難所コマンド境界のデバッグを出す。 |
 | `HubIMU/` | SPIKE-RT/pybricks IMU APIの薄いラッパー。 |
 | `app.cpp` | TOPPERSタスク入口と、残してある直進/旋回テスト関数を置く。競技本番の流れは `scenario/CompetitionScenario.cpp` に渡す。 |
 
@@ -40,7 +40,7 @@
 2. Bluetoothログ接続待ち。
 3. 白/黒の反射値をフォースセンサー操作で取得し、反射値を `0..100` へ正規化する。
 4. フォースセンサーでキャリブレーション開始待ち。
-5. 姿勢キャリブレーション後、停止したまま約10秒IMU headingの流れを測り、ドリフト補正係数へ組み込む。
+5. 姿勢キャリブレーション後、SPIKE側の3D headingを走行基準にする。`ENABLE_CUSTOM_HEADING_DRIFT_CORRECTION = true` の比較条件では、停止したまま約10秒headingの流れを測って独自補正へ組み込む。
 6. フォースセンサーで走行開始待ち。
 7. センサーアームを下ろしながらPID直進し、下降完了後に直線/カーブ判定ありライントレースへ切り替える。
 8. ライントレース開始5秒後に超音波センサーを有効化し、15cm以内のペットボトルを検知したら停止する。
@@ -60,7 +60,7 @@ flowchart TD
     C1 --> C2["color_sensor_service_set_normalization_reflection"]
     C2 --> B2["キャリブレーション開始待ち<br/>wait_for_force_start"]
     B2 --> D["姿勢キャリブレーション<br/>calibrate_robot_pose"]
-    D --> D1["停止中ドリフト測定<br/>hub_imu_set_heading_drift_rate"]
+    D --> D1["独自補正が有効な時だけ停止中ドリフト測定<br/>hub_imu_set_heading_drift_rate"]
     D1 --> B3["走行開始待ち<br/>wait_for_force_start"]
 
     B3 --> E["直線判定ありライントレース"]
@@ -114,7 +114,7 @@ flowchart TD
 
 1. Bluetoothログ接続待ち。
 2. フォースセンサーでキャリブレーション開始待ち。
-3. 姿勢キャリブレーションと停止中IMUドリフト測定。
+3. 姿勢キャリブレーション。独自ドリフト補正が有効な時だけ停止中測定も行う。
 4. フォースセンサーで難所走行開始待ち。
 5. `run_challenge_section()` で既定の難所ステップを実行。
 6. 難所終了時のheadingを `H+0.0` のように表示。
@@ -128,12 +128,14 @@ flowchart TD
 | 加速、定速、減速をつなぐ | `speed_up(a,b,mm); drive_straight_mm_keep_speed(b,mm); speed_down(b,0,mm);` | `keep_speed` は最後にブレーキしない。減速の `end_speed == 0` で止まる。 |
 | 右90度旋回 | `turn(speed, 90)` | 正の角度は右、負の角度は左。成功後は次の直進PID目標を旋回後headingに合わせる。 |
 | 左90度旋回 | `turn(speed, -90)` | 内部では `TurnDirection::Left`、`direction_sign = -1`。 |
+| エンコーダ主制御で旋回 | `turn_by_encoder(speed, degrees)` | 難所の現在モード。左右エンコーダで終了し、減速後にcoastしてからブレーキする。 |
+| 絶対方位へ旋回 | `turn_to_heading(speed, target_heading)` | 現在headingから目標headingへの最短方向で旋回する。難所では設定をfalseにした比較モードで使用する。 |
 | ライントレースを1周期進める | `line_trace_step()` | 周期タスクから呼ぶ。内部で `LineTracer_Run()` を1回実行。 |
 | ライントレースを距離で止める | `run_line_trace_mm(distance_mm)` | エンコーダ距離で終了。`LineTracer_Run()` を使う形で距離走行を統一している。 |
 | 状態管理つきでライントレースする | `robot_state_controller_run_line_trace(&options)` | `options.distance_mm` で距離停止、`options.ultrasonic_start_delay_us` で超音波ONタイミングを指定する。 |
 | 白黒反射値を使って正規化範囲を設定する | `color_sensor_service_set_normalization_reflection(black, white)` | 黒反射値と白反射値を渡し、`normalized_reflection` の0..100換算に使う。 |
-| `F/B/L/R`文字列どおりに走る | `challenges_run_steps("FFBBRR")` | `F`=前進1ステップ、`B`=後退1ステップ、`L`=左90度、`R`=右90度。連続した同じ文字はまとめて走る/回る。 |
-| 既定の難所ステップを走る | `challenges_run_default_steps()` | `challenges.cpp` 内の既定文字列を実行する。 |
+| `F/B/L/R`文字列どおりに走る | `challenges_run_steps("FFBBRR")` | 文字列全体を事前検証し、開始時の現在方位を直進基準に設定してから、連続した同じ文字をまとめて走る/回る。 |
+| 既定の難所ステップを走る | `challenges_run_default_steps()` | 長い文字列を使わず、`challenges.cpp` 内の事前圧縮した型付きコマンド表を直接実行する。 |
 | ボトルを探索して接近する | `bottle_detection_run()` | 走行開始時の正面を0度とし、-90度から+90度まで超音波で探索する。 |
 | カラーセンサーを上げる/下げる | `sensor_lift_start_up()` / `sensor_lift_start_down()` | 開始後は `sensor_lift_step()` を周期的に呼んで完了させる。 |
 
@@ -240,7 +242,7 @@ TOPPERSから直接呼ばれるタスク入口と、残してある直進/旋回
 | `waitForBluetoothLog()` | 設定が有効ならBluetooth readyを待つ。 | 未接続=`B`、接続済み準備中=`b`、ready=`A`。 |
 | `sampleReflection(display_char)` | `W` または `K` を表示し、フォース操作後に反射値を複数回サンプルして平均する。 | 白/黒正規化キャリブレーション用。 |
 | `calibrateColorReflection()` | 白反射値、黒反射値を取得し、`color_sensor_service_set_normalization_reflection()` へ渡す。 | 成功時は `N` 表示。失敗時は `W/C`, `K/C`, `N/R`。 |
-| `calibrateRobotPoseAndDrift()` | 姿勢キャリブレーション後に停止したままraw headingを約10秒測り、1分あたりのドリフト量を `hub_imu_set_heading_drift_rate()` へ設定する。 | 結果は `D+0.0` のように表示する。以後 `hub_imu_get_heading()` は補正済みheadingになる。 |
+| `calibrateRobotPoseAndDrift()` | 姿勢キャリブレーション後、`ENABLE_CUSTOM_HEADING_DRIFT_CORRECTION` が有効な時だけraw headingを約10秒測り、1分あたりのドリフト量を設定する。 | 現在の既定値は無効。独自補正と10秒待機を省き、SPIKE側の3D headingをそのまま制御基準にする。表示は `D+0.0`。 |
 | `runBottleColorCheckpoint()` | `run_line_trace_to_bottle_section()` と `run_bottle_color_carry_section()` を順に実行する。 | ボトル前後の主まとまり。 |
 | `runCurrentChallengeLap()` | Bluetooth待ち、反射値正規化、フォース待ち、姿勢/ドリフトキャリブレーション、フォース待ち、ボトル区間、難所、heading表示、押し出し、ゴールを1回実行する。 | 現在の主シナリオ。成功時は `E` 表示。 |
 | `runChallengeOnlyTestLap()` | Bluetooth待ち、フォース待ち、姿勢/ドリフトキャリブレーション、フォース待ち、難所、heading表示だけを1回実行する。 | 難所だけのテスト用。成功時は `E` 表示。 |
@@ -315,7 +317,7 @@ config配下は関数ではなく、ほぼ全モジュールが参照する設�
 | `ControlConfig.h` | 制御周期、IMU/モーター準備、直進PID、旋回PID、安全停止、停止後settle。 |
 | `SensorConfig.h` | カラーセンサー正規化値、反射値サンプル、カラーセンサー昇降モーター設定。 |
 | `LogConfig.h` | Bluetoothログ待ち、CSVログ周期。 |
-| `ChallengeConfig.h` | 難所だけテスト切り替え、難所ステップ距離/速度。 |
+| `ChallengeConfig.h` | 難所だけテスト切り替え、難所ステップ距離/速度、S字/8の字テスト設定。 |
 | `BottleConfig.h` | 超音波ON/OFF、ボトル検知/色判定/搬送/押し出し/ゴール移動の距離と速度。 |
 | `LineTraceConfig.h` | `LineTracer` の `#define` 調整値。直線/カーブ判定、power、IMU補正、エッジ設定。 |
 | `RobotConfig.h` | 上記configの入口。型依存の色判定レンジと共通型もここに残す。 |
@@ -338,7 +340,8 @@ config配下は関数ではなく、ほぼ全モジュールが参照する設�
 | `CONTROL_PERIOD_US = 10000` | 距離走行/旋回などの通常制御周期。10ms。 |
 | `CONTROL_PERIOD_SEC = 0.01` | PID微分/積分計算用の秒単位周期。 |
 | `CALIBRATION_SAMPLES = 100` | IMU取り付け角の平均サンプル数。 |
-| `IMU_DRIFT_CALIBRATION_TIME_US = 10000000` | 姿勢キャリブレーション後、停止したままheadingドリフトを測る時間。10秒。 |
+| `ENABLE_CUSTOM_HEADING_DRIFT_CORRECTION = false` | アプリ独自の時間比例heading補正を使うか。現在はSPIKE側headingとのA/B確認のため無効。 |
+| `IMU_DRIFT_CALIBRATION_TIME_US = 10000000` | 独自補正が有効な場合に、停止したままheadingドリフトを測る時間。10秒。 |
 | `IMU_READY_RETRIES = 100` | IMU準備待ち回数。1回100msなので最大約10秒。 |
 | `MOTOR_SETUP_RETRIES = 50` | モーターsetupリトライ回数。1回10msなので最大約0.5秒。 |
 | `MAX_CONTROL_CYCLES = 3000` | 汎用制御ループの安全停止用。 |
@@ -391,13 +394,16 @@ encoder_limit = wheel_encoder_degrees_for_turn * ENCODER_LIMIT_MARGIN + ENCODER_
 | 定義 | 意味 |
 | --- | --- |
 | `MIN_TURN_SPEED_DEG_S = 40` | 通常旋回で最低限動かす速度。 |
-| `TURN_APPROACH_TOLERANCE_DEG = 0.5` | 通常旋回を終えて停止後補正へ渡す許容角。 |
+| `TURN_APPROACH_TOLERANCE_DEG = 1.0` | 通常旋回を終える許容角。微小な往復旋回を避ける。 |
 | `TURN_APPROACH_STABLE_COUNT = 3` | 通常旋回で許容角に連続して入る必要回数。 |
-| `GYRO_TOLERANCE_DEG = 0.2` | 最終的にOKとみなす角度誤差。 |
+| `LEFT_TURN_PRE_BRAKE_DEG = 0.0` | 左主旋回を理想角より手前で止める量。左の行き過ぎは未確認なので現在は無効。 |
+| `RIGHT_TURN_PRE_BRAKE_DEG = 7.0` | ジャイロ旋回時、右主旋回を理想角より7度手前でブレーキする。難所のエンコーダ主制御モードでは使わない。 |
+| `GYRO_TOLERANCE_DEG = 1.5` | 停止後補正が目標へ到達したとみなす角度誤差。 |
+| `TURN_SETTLED_ACCEPTANCE_TOLERANCE_DEG = 3.0` | 通常旋回後に再旋回せず走行を続けられる誤差。残差は方位格子へ累積せず、次の直進PIDで戻す。 |
 | `TURN_STABLE_COUNT = 1` | 精密補正では許容角に入ったら即停止する。 |
-| `TURN_SETTLED_CORRECTION_CYCLES = 250` | 精密補正1回の最大周期。 |
+| `TURN_SETTLED_CORRECTION_CYCLES = 100` | 停止後補正1回の最大周期。10ms制御で最大約1秒。 |
 | `TURN_SETTLED_CORRECTION_SPEED_DEG_S = 50` | 精密補正の速度上限。 |
-| `TURN_SETTLED_CORRECTION_ATTEMPTS = 5` | 精密補正を繰り返す最大回数。 |
+| `TURN_SETTLED_CORRECTION_ATTEMPTS = 1` | 静止摩擦とバックラッシュによる往復を避けるため、停止後補正は最大1回。 |
 | `TURN_FINE_CORRECTION_MIN_SPEED_DEG_S = 50` | 精密補正時の最低速度。 |
 | `TURN_FINE_CORRECTION_PULSE_WINDOW_DEG = 0.5` | この角度以内では1パルスごとに止めてIMUを再測定する。 |
 | `TURN_FINE_COAST_BRAKE_WINDOW_DEG = 3.0` | 精密補正中、この角度以内で勢いが残っていれば早めにブレーキする。 |
@@ -471,9 +477,27 @@ encoder_limit = wheel_encoder_degrees_for_turn * ENCODER_LIMIT_MARGIN + ENCODER_
 
 | 定義 | 意味 |
 | --- | --- |
-| `CHALLENGE_STEP_FORWARD_DISTANCE_MM = 125` | `F`/`B` 1文字ぶんの走行距離。12.5cm。連続 `F`/`B` はこの距離に文字数を掛けてまとめて走る。 |
-| `CHALLENGE_STEP_FORWARD_SPEED_DEG_S = 600` | `F` 前進/`B` 後退で使うモーター速度。 |
-| `CHALLENGE_STEP_TURN_SPEED_DEG_S = 160` | `L/R` の90度旋回で使う速度。 |
+| `CHALLENGE_STEP_FORWARD_DISTANCE_MM = 130` | `F` 1文字ぶんの前進指令距離。連続 `F` はこの距離に文字数を掛けてまとめて走る。 |
+| `CHALLENGE_STEP_FORWARD_SPEED_DEG_S = 500` | `F` 前進で使うモーター速度。 |
+| `CHALLENGE_STEP_BACKWARD_DISTANCE_MM = 130` | `B` 1文字ぶんの後退指令距離。前進とは独立して実測距離を補正する。 |
+| `CHALLENGE_STEP_BACKWARD_SPEED_DEG_S = 500` | `B` 後退で使うモーター速度。後退時の滑りを前進と独立して調整できる。 |
+| `ENABLE_CHALLENGE_BACKWARD_TO_FORWARD_CONTROL = true` | `B`の直後に`F`が直接続く時だけ、固定距離補償、位置保持、前進緩加速を有効にする。 |
+| `CHALLENGE_BACKWARD_TO_FORWARD_HOLD_TIME_US = 130000` | 補正後の後退位置をモーターholdで維持し、揺り戻しを止める時間。 |
+| `CHALLENGE_BACKWARD_TO_FORWARD_START_SPEED_DEG_S = 120` | 方向反転後の前進開始速度。 |
+| `CHALLENGE_BACKWARD_TO_FORWARD_ACCEL_DISTANCE_MM = 60` | 方向反転後、通常前進速度まで線形加速する最大距離。短いFでは全距離の半分までに制限する。 |
+| `CHALLENGE_BACKWARD_TO_FORWARD_BACKWARD_COMPENSATION_MM = 80` | `B→F`反転1回につき、B側の固定距離損失を補うため低速で追加後退する距離。 |
+| `CHALLENGE_BACKWARD_TO_FORWARD_COMPENSATION_SPEED_DEG_S = 120` | B側の追加後退に使う低速指令。 |
+| `CHALLENGE_BACKWARD_TO_FORWARD_FORWARD_COMPENSATION_MM = 80` | `B→F`反転1回につき、F側のバックラッシュで失われる固定距離を前進目標へ加える量。 |
+| `CHALLENGE_STEP_TURN_SPEED_DEG_S = 120` | `L/R` の90度旋回で使う速度。右旋回の惰性を減らすため160、140から段階的に下げた。 |
+| `USE_ENCODER_PRIMARY_CHALLENGE_TURN = true` | trueなら難所旋回の終了条件を左右エンコーダにする。falseなら絶対方位格子と `turn_to_heading()` の比較モードへ戻す。 |
+| `CHALLENGE_ENCODER_LEFT_TURN_SCALE = 1.0` | 左旋回の理論エンコーダ角へ掛ける実機補正倍率。 |
+| `CHALLENGE_ENCODER_RIGHT_TURN_SCALE = 0.738` | 実走で確認した右過旋回を抑える現在の調整値。開始低速加速は無効化した状態で、この倍率を単独評価する。 |
+| `CHALLENGE_ENCODER_TURN_DECEL_WINDOW_DEG = 100.0` | 目標の100エンコーダ度手前から線形減速する。 |
+| `CHALLENGE_ENCODER_TURN_MIN_SPEED_DEG_S = 35` | 減速終端の最低速度。静止摩擦で目標前に止まらないための下限。 |
+| `CHALLENGE_ENCODER_TURN_SYNC_KP = 0.8` | 左右エンコーダ移動量差を速度差へ変換する同期ゲイン。先行輪を遅くし、遅れている輪を速くする。 |
+| `CHALLENGE_ENCODER_TURN_SYNC_MAX_DEG_S = 40` | 左右同期補正の速度上限。急な速度変化と左右振動を抑える。 |
+| `CHALLENGE_ENCODER_TURN_COAST_TIME_US = 30000` | 目標到達後に速度指令を切り、ブレーキ前に惰性で減速させる時間。 |
+| `CHALLENGE_ENCODER_TURN_BRAKE_SETTLE_TIME_US = 60000` | coast後のブレーキと姿勢安定待ち時間。 |
 
 ### ボトル検出
 
@@ -552,9 +576,9 @@ encoder_limit = wheel_encoder_degrees_for_turn * ENCODER_LIMIT_MARGIN + ENCODER_
 
 | 型 | 値 | 意味 |
 | --- | --- | --- |
-| `turn_result_t` | `OK=0`, `ENCODER_LIMIT=1`, `TIMEOUT=2`, `MOTOR_ERROR=-1` | `turn()` の結果。 |
+| `turn_result_t` | `OK=0`, `ENCODER_LIMIT=1`, `TIMEOUT=2`, `MOTOR_ERROR=-1` | `turn()` / `turn_by_encoder()` / `turn_to_heading()` の結果。 |
 | `drive_result_t` | `OK=0`, `TIMEOUT=2`, `MOTOR_ERROR=-1` | 直進/カーブ/加減速の結果。 |
-| `turn_debug_t` | `active`, `phase`, `command_degrees`, `heading_error` など | CSVの `turn,...` 行へ出す旋回状態。 |
+| `turn_debug_t` | `active`, `phase`, `command_degrees`, `target_degrees`, `heading_error`, エンコーダ目標/停止/左右値、左右速度指令、同期誤差など | CSVの `turn,...` 行へ出す旋回目標、制御状態、左右輪同期、停止余角の計測値。 |
 | `straight_debug_t` | `active`, `target_heading`, `heading_error`, `correction_deg_s` など | CSVの `straight,...` 行へ出す直進PID状態。 |
 
 ### 内部状態
@@ -579,7 +603,7 @@ encoder_limit = wheel_encoder_degrees_for_turn * ENCODER_LIMIT_MARGIN + ENCODER_
 | `clampDouble(value, limit)` | `value` を `-abs(limit)..abs(limit)` に丸める。 | PID出力制限。 |
 | `publishStraightDebug(debug)` | `straight_debug` をCPUロック中に更新し、`update_count` を進める。 | ログタスクとの競合を避ける。 |
 | `publishTurnDebug(debug)` | `turn_debug` をCPUロック中に更新し、`update_count` を進める。 | ログタスクとの競合を避ける。 |
-| `setStraightPidTargetHeading(heading)` | 直進PIDの共有目標headingを保存する。 | `turn()` 成功後にも使う。 |
+| `setStraightPidTargetHeading(heading)` | 直進PIDの共有目標headingを保存する。 | 相対旋回、絶対方位旋回の成功後にも使う。 |
 | `requestStraightStartDamping()` | 次の直進開始だけダンピングを有効化する。 | 旋回後の再スタート揺れ対策。 |
 | `consumeStraightStartDamping()` | ダンピング要求を読み、読んだらクリアする。 | `driveStraightByEncoder()` の開始時に使う。 |
 | `getStraightPidTargetHeading()` | 共有目標headingを返す。未設定なら現在headingを目標にする。 | 直進PIDの基準。 |
@@ -587,7 +611,13 @@ encoder_limit = wheel_encoder_degrees_for_turn * ENCODER_LIMIT_MARGIN + ENCODER_
 | `encoderDegreesForTurn(robot_degrees)` | ロボット角度から車輪側エンコーダ概算を出す。 | `abs(robot_degrees) * TREAD_MM / WHEEL_DIAMETER_MM`。 |
 | `turnAngleScale(direction)` | 左右どちらの補正倍率を使うか選ぶ。 | 左=`LEFT_TURN_ANGLE_SCALE`、右=`RIGHT_TURN_ANGLE_SCALE`。 |
 | `correctedTurnTargetDegrees(degrees, direction)` | 指令角度へ倍率とオフセットを反映する。 | `abs(degrees) * scale + TURN_ANGLE_OFFSET_DEG`。負なら0に丸める。 |
+| `turnApproachTargetDegrees(ideal, direction_sign)` | 主旋回をブレーキする角度を返す。 | 右は `ideal - RIGHT_TURN_PRE_BRAKE_DEG`、左は対応する設定値を引く。停止後補正は `ideal` を使う。 |
+| `encoderTurnScale(direction_sign)` | 難所の左右別エンコーダ補正倍率を選ぶ。 | 右=`CHALLENGE_ENCODER_RIGHT_TURN_SCALE`、左=`CHALLENGE_ENCODER_LEFT_TURN_SCALE`。 |
+| `robotDegreesForEncoderTurn(encoder_degrees)` | 車輪エンコーダ角を機体旋回角相当へ戻す。 | `encoder_degrees * WHEEL_DIAMETER_MM / TREAD_MM`。ログの残角表示に使う。 |
+| `encoderTurnSpeed(max_speed, remaining_encoder_degrees)` | エンコーダ目標までの残量から旋回速度を作る。 | 減速区間内では最大速度から最低速度まで線形に下げる。 |
+| `coastThenBrakeTurn(motors)` | 速度指令を切ってcoastし、その後ブレーキする。 | 強い即時ブレーキによる車体の揺り戻しを抑える。 |
 | `averageEncoderTravelDegrees(motors, left_start, right_start)` | 旋回開始からの左右エンコーダ移動量絶対値平均。 | `(abs(left_delta) + abs(right_delta)) / 2`。 |
+| `readEncoderTurnTravel(motors, left_start, right_start)` | 左右個別移動量と平均を同じ時点で読む。 | 片輪の空転と左右差を安全判定・BLEログで確認する。 |
 | `signFromDistance(distance)` | 距離が負なら `-1`、それ以外 `1`。 | 前進/後退方向。 |
 | `signFromDouble(value)` | 値が負なら `-1`、それ以外 `1`。 | PID出力や旋回方向の符号。 |
 | `interpolateSpeed(start, end, progress)` | 進捗率で速度を線形補間する。 | `start + (end - start) * progress`。 |
@@ -608,14 +638,19 @@ encoder_limit = wheel_encoder_degrees_for_turn * ENCODER_LIMIT_MARGIN + ENCODER_
 | `turnSign(direction)` | 左なら `-1`、右なら `1`。 | IMU headingの符号へ合わせる。 |
 | `calculateTurnPidSpeed(pid, error, max, tolerance, min, force_error_direction)` | 旋回速度指令を計算する。 | 許容角内なら0。PID出力を上限内に丸め、最低速度を保証。精密補正時はPID符号ではなく誤差符号を優先する。 |
 | `setSignedTurnSpeed(motors, turn_speed)` | その場旋回速度を左右へ設定する。 | 左=`turn_speed`、右=`-turn_speed`。正なら右旋回。 |
+| `clampEncoderTurnWheelSpeed(requested, max, reached)` | エンコーダ旋回の片輪速度を許容範囲へ丸める。 | 到達済みの輪は0、走行中の輪は最低速度以上かつ最大速度以下にする。 |
+| `synchronizedEncoderTurnWheelSpeeds(base, max, target, travel)` | 左右エンコーダ移動量差から片輪ごとの速度を作る。 | 先行輪から同期補正を引き、遅れ輪へ加える。補正量は設定上限内に制限する。 |
+| `setSynchronizedEncoderTurnSpeeds(motors, direction, speeds)` | 左右別の同期速度へ旋回方向の符号を付けてモーターへ渡す。 | 右旋回では左輪が正、右輪が負。左旋回では逆。 |
 | `getYawRateDegreesPerSecond()` | IMUのZ角速度を返す。 | 精密補正で勢いが残っているか判定する。 |
 | `runTurnPidUntilStable(...)` | 通常旋回と精密補正で共通の旋回ループ。 | 許容角内に `stable_required_count` 回入るとOK。エンコーダ上限超えで `ENCODER_LIMIT`、周期超過で `TIMEOUT`。精密補正では0.5度外側は連続補正、0.5度以内はパルス停止、3度以内で誤差が減り角速度が5deg/s以上なら早めにブレーキする。 |
+| `runTurnControl(...)` | 相対旋回と絶対方位旋回で共用する制御本体。 | phase 1は左右別の事前ブレーキを引いた角度、停止後判定とphase 2は理想角を使う。成功後は理想 `target_heading` を直進PIDへ渡す。 |
 
 ### 公開関数
 
 | 関数 | 処理 | 返り値/使い方 |
 | --- | --- | --- |
 | `stop_motors()` | 走行モーターを取得できればブレーキ停止する。 | 緊急停止や終了時。 |
+| `hold_motors()` | 呼出時の左右エンコーダ位置を能動保持する。 | `pup_motor_hold()`を使い、B→F反転前の前戻りを抑える。 |
 | `reset_straight_pid_heading()` | 現在headingを直進PIDの目標へ保存する。 | 姿勢キャリブレーション後、旋回失敗後など。 |
 | `drive_straight_mm(speed, distance_mm)` | 一定速度で距離走行し、最後にブレーキする。 | `distance_mm` が負なら後退。 |
 | `drive_straight_mm_keep_speed(speed, distance_mm)` | 一定速度で距離走行し、最後にブレーキしない。 | 加速と減速の間に挟む。 |
@@ -623,7 +658,9 @@ encoder_limit = wheel_encoder_degrees_for_turn * ENCODER_LIMIT_MARGIN + ENCODER_
 | `drive_curve_mm_keep_speed(left_speed, right_speed, distance_mm)` | 左右速度差でカーブ走行し、最後にブレーキしない。 | 次の走行へ速度をつなぐ時。 |
 | `speed_up(start_speed, end_speed, distance_mm)` | 指定距離で速度を線形に上げる。最後はブレーキしない。 | `runProfiledStraight()` の加速区間。 |
 | `speed_down(start_speed, end_speed, distance_mm)` | 指定距離で速度を線形に下げる。`end_speed == 0` なら最後にブレーキ。 | `runProfiledStraight()` の減速区間。 |
-| `turn(speed, degrees)` | IMUで指定角度旋回する。正は右、負は左。 | 通常旋回後、停止して誤差が `GYRO_TOLERANCE_DEG` より大きければ精密補正を最大5回行う。成功時は次の直進PID目標を旋回後の理想headingへ引き継ぐ。 |
+| `turn(speed, degrees)` | IMUで指定角度旋回する。正は右、負は左。 | 通常旋回後、停止誤差が `TURN_SETTLED_ACCEPTANCE_TOLERANCE_DEG` を超えた場合だけ停止後補正を最大1回行う。成功時は次の直進PID目標を旋回後の理想headingへ引き継ぐ。 |
+| `turn_by_encoder(speed, degrees)` | 左右エンコーダを主観測にして指定角度を旋回する。 | 難所用。左右輪を同期し、両輪が個別目標へ到達してからcoast、ブレーキの順で止める。ジャイロは終了判定に使わない。 |
+| `turn_to_heading(speed, target_heading)` | 補正済みIMU headingの絶対目標へ最短方向で旋回する。 | 左右角度倍率と角度オフセットは適用せず、指定された格子方位そのものへ収束させる。 |
 | `turn_get_debug()` | 最新の旋回デバッグ値をCPUロック中にコピーして返す。 | `SensorCsvLogger` の `turn,...` 行で使う。 |
 | `straight_get_debug()` | 最新の直進PIDデバッグ値をCPUロック中にコピーして返す。 | `SensorCsvLogger` の `straight,...` 行で使う。 |
 
@@ -634,15 +671,27 @@ encoder_limit = wheel_encoder_degrees_for_turn * ENCODER_LIMIT_MARGIN + ENCODER_
 3. `base_speed = max(abs(speed), MIN_TURN_SPEED_DEG_S)` を作る。
 4. `start_heading` と `target_heading = start_heading + direction_sign * target_degrees` を保存する。
 5. エンコーダ安全上限を計算する。
-6. `runTurnPidUntilStable()` を `phase=1`、許容 `TURN_APPROACH_TOLERANCE_DEG` で実行する。
-7. ブレーキして `DRIVE_STOP_SETTLE_TIME_US` 待つ。
-8. 停止後誤差が `GYRO_TOLERANCE_DEG` より大きければ、`phase=2..6` で精密補正を繰り返す。
-9. 最終誤差が許容外なら `TURN_RESULT_TIMEOUT`。
+6. 左右別の `*_TURN_PRE_BRAKE_DEG` を引いた主旋回目標を作り、`runTurnPidUntilStable()` を `phase=1` で実行する。
+7. ブレーキして `DRIVE_STOP_SETTLE_TIME_US` 待ち、元の理想角に対する停止後誤差を測る。
+8. 理想角との誤差が `TURN_SETTLED_ACCEPTANCE_TOLERANCE_DEG` を超えた場合だけ、`phase=2` で最大1回の停止後補正を行う。
+9. 補正ループがTIMEOUTでも最終誤差が走行継続範囲内なら成功とする。モーター異常とエンコーダ上限は成功で上書きしない。
 10. 成功なら次の直進PID目標を `target_heading` にし、直進開始ダンピングを予約する。失敗なら現在headingを直進PID目標にする。
+
+`turn_to_heading()` は現在headingと絶対目標の差を `-180..180` 度へ正規化し、その差を同じ制御本体へ渡します。既に許容角内ならモーターを動かさず、直進PID目標だけを指定方位へ揃えます。
+
+### `turn_by_encoder()` の処理順
+
+1. 機体角を `abs(degrees) * TREAD_MM / WHEEL_DIAMETER_MM` で左右車輪の理論エンコーダ角へ変換し、左右別の実機補正倍率を掛ける。
+2. 左右それぞれの開始エンコーダから移動量と目標までの残量を計算する。左右平均だけでは終了せず、両輪が個別目標へ到達するまで制御する。
+3. 遅れている側の残量を基準に、目標の100エンコーダ度手前から120deg/sを35deg/sへ線形に落とす。
+4. 左右の移動量差へ同期ゲインを掛け、先行輪を減速、遅れ輪を増速する。片輪が先に目標へ達した場合は、その輪を停止してもう片輪だけを追従させる。
+5. 両輪の目標到達で速度指令を切り、30ms coastした後にブレーキし、60ms待つ。
+6. 指令を切った時点と停止後のエンコーダ値、左右速度指令、同期誤差をログへ残す。片輪だけが安全上限を超えた場合は失敗停止する。
+7. ジャイロは終了判定へ使わずログに残す。停止後の現在headingだけを次の短区間直進PIDの保持方位にする。
 
 ## challenges/challenges.h / challenges.cpp
 
-難所攻略用のステップ文字列を読み、既存の距離走行とIMU旋回で順に走るモジュールです。
+難所攻略用のステップ文字列を読み、既存の距離走行と選択中の旋回方式で順に走るモジュールです。
 既存ファイルは移動せず、`challenges/` に新規追加しています。
 
 ### 既定ステップ文字列
@@ -655,8 +704,8 @@ FFFFFFRBBBBBBBBRBFRBBBBBBBFFFRFFRBBBBRFFRBBBBBBBFFFRFFRBBBBRFFRBBBBBBBFFFRFFRBBB
 
 | 文字 | 処理 |
 | --- | --- |
-| `F` | 前進1ステップ。距離は `CHALLENGE_STEP_FORWARD_DISTANCE_MM`。連続した `F` はまとめて1回の直進にする。 |
-| `B` | 後退1ステップ。距離は `CHALLENGE_STEP_FORWARD_DISTANCE_MM`。連続した `B` はまとめて1回の後退にする。 |
+| `F` | 前進1ステップ。距離・速度は前進専用設定。連続した `F` はまとめて1回の直進にする。 |
+| `B` | 後退1ステップ。距離・速度は後退専用設定。連続した `B` はまとめて1回の後退にする。 |
 | `L` | 左90度旋回。連続した `L` は `count * -90` 度としてまとめて1回の旋回にする。 |
 | `R` | 右90度旋回。連続した `R` は `count * 90` 度としてまとめて1回の旋回にする。 |
 | 空白/改行/tab | 無視する。 |
@@ -669,7 +718,7 @@ FFFFFFRBBBBBBBBRBFRBBBBBBBFFFRFFRBBBBRFFRBBBBBBBFFFRFFRBBBBRFFRBBBBBBBFFFRFFRBBB
 | `challenge_run_result_t` | `CHALLENGE_RUN_RESULT_OK = 0` | 全ステップ成功。 |
 |  | `CHALLENGE_RUN_RESULT_INVALID_STEP = 1` | `F/B/L/R` と空白類以外の文字があった。 |
 |  | `CHALLENGE_RUN_RESULT_DRIVE_FAILED = 2` | `drive_straight_mm()` が失敗した。 |
-|  | `CHALLENGE_RUN_RESULT_TURN_FAILED = 3` | `turn()` が失敗した。 |
+|  | `CHALLENGE_RUN_RESULT_TURN_FAILED = 3` | 選択中の `turn_by_encoder()` または `turn_to_heading()` が失敗した。 |
 |  | `CHALLENGE_RUN_RESULT_EMPTY_STEPS = 4` | 有効な命令文字が1つもなかった。 |
 |  | `CHALLENGE_RUN_RESULT_NULL_STEPS = -1` | `steps == nullptr`。 |
 
@@ -677,30 +726,43 @@ FFFFFFRBBBBBBBBRBFRBBBBBBBFFFRFFRBBBBRFFRBBBBBBBFFFRFFRBBBBRFFRBBBBBBBFFFRFFRBBB
 
 | 関数 | 処理 | 使い方 |
 | --- | --- | --- |
+| `ChallengeRunContext` | 試走番号、命令番号、90度刻みの格子目標方位、直前の直進方向を保持する。 | `run_sequence`と`command_sequence`でログを識別し、`last_drive_direction=-1/0/1`で直接隣接するB→Fだけを検出する。 |
+| `ChallengeCommandSnapshot` | 命令境界の時刻、左右エンコーダ、方位を保持する。 | 開始・終了の差から実行時間、車輪移動量、方位変化を求める。 |
 | `isIgnoredStep(step)` | 空白、改行、CR、tabならtrue。 | 長い文字列を整形して書けるようにする。 |
 | `countSameSteps(steps, start_index, target_step)` | `start_index` から続く同じ命令文字の数を数える。 | `FFFFFFFF` を1回の `8 * CHALLENGE_STEP_FORWARD_DISTANCE_MM` 走行、`LL` を1回の左180度旋回にまとめる。 |
-| `runForwardSteps(count)` | `count * CHALLENGE_STEP_FORWARD_DISTANCE_MM` だけ直進する。 | `drive_straight_mm(CHALLENGE_STEP_FORWARD_SPEED_DEG_S, distance)` を呼ぶ。 |
-| `runBackwardSteps(count)` | `count * CHALLENGE_STEP_FORWARD_DISTANCE_MM` だけ後退する。 | `drive_straight_mm(CHALLENGE_STEP_FORWARD_SPEED_DEG_S, -distance)` を呼ぶ。 |
-| `runTurnSteps(step, count)` | `L` なら `count * -90` 度、`R` なら `count * 90` 度旋回する。 | `turn(CHALLENGE_STEP_TURN_SPEED_DEG_S, degrees)` を呼ぶ。 |
+| `normalizeGridHeading(heading)` | 格子目標を `-180..180` 度へ正規化する。 | 旋回を繰り返しても格子値を一定範囲に保つ。 |
+| `captureCommandSnapshot()` | `get_tim()`、左右モーターカウント、IMU headingを取得する。 | モーター取得失敗時も方位は残し、命令ログの`cmok=0`で示す。 |
+| `commandStep(type)` | 内部コマンド型を`F/B/L/R`へ戻す。 | 命令ログの`ccmd`に使用する。 |
+| `commandTargetDistanceMm(type, count)` | F/Bの符号付き目標距離を返す。 | Fは正、Bは負。旋回では0。 |
+| `commandTargetDegrees(type, count)` | L/Rの符号付き目標角度を返す。 | Lは負、Rは正。直進では0。 |
+| `commandTargetHeading(type, count, grid)` | 命令終了時の論理格子方位を返す。 | F/Bでは現在格子、L/Rでは90度単位の次格子。 |
+| `enqueueCommandLog(...)` | 開始・終了計測値を`ChallengeCommandLogEntry`へ変換する。 | 走行タスクからBluetooth送信せず、非同期キューへ積む。 |
+| `commandTypeForStep(step, type)` | `F/B/L/R` を内部の `ChallengeCommandType` へ変換する。 | 変換できない文字ならfalse。 |
+| `validateStepString(steps)` | 文字列全体をモーター駆動前に検証する。 | 不正文字を途中まで走ってから検出することを防ぐ。 |
+| `prepareChallengeRun(context)` | 停止後に200ms待ち、現在headingを直進PID目標と方位格子原点へ設定する。 | 開始ボタン操作による機体の揺れや向きの変化を最初の直進へ持ち込まない。 |
+| `runForwardSteps(count, follows_backward)` | 通常は`count * CHALLENGE_STEP_FORWARD_DISTANCE_MM`だけ直進する。 | B直後だけ10mm低速後退、170ms hold、前進目標への10mm加算を行い、120deg/sから最大60mmかけて450deg/sへ加速する。 |
+| `runBackwardSteps(count)` | `count * CHALLENGE_STEP_BACKWARD_DISTANCE_MM` だけ後退する。 | 後退専用速度で `drive_straight_mm()` を呼ぶ。Fの設定から独立して調整できる。 |
+| `runTurnSteps(step, count, context)` | `L=-90` / `R=+90` 度の命令を選択中の方式で旋回する。 | 現在は `turn_by_encoder()`。設定をfalseにすると格子目標を使う `turn_to_heading()` へ戻る。成功時だけ論理格子を更新する。 |
+| `runCommand(type, count, context)` | 型付きコマンドを前進、後退、選択中の旋回処理へ振り分ける。 | 命令前後を計測して非同期ログへ記録し、成功したF/Bの方向を保存する。既定コマンド表と文字列APIで共通利用する。 |
+| `runDefaultCommands()` | 事前圧縮した31コマンドを表の先頭から実行する。 | 元の83文字の既定経路と同じ動作を表す。 |
 
 ### 公開関数
 
 | 関数 | 処理 | 返り値/使い方 |
 | --- | --- | --- |
-| `challenges_run_steps(steps)` | 渡された文字列を先頭から読み、`F/B/L/R` を順に実行する。 | 途中失敗なら `stop_motors()` して結果を返す。 |
-| `challenges_run_default_steps()` | `DEFAULT_CHALLENGE_STEPS` を `challenges_run_steps()` へ渡して実行する。 | 現在の `CompetitionScenario` が呼ぶ。 |
+| `challenges_run_steps(steps)` | 文字列を事前検証し、開始方位を取り直してから `F/B/L/R` を順に実行する。 | 途中失敗なら `stop_motors()` して結果を返す。 |
+| `challenges_run_default_steps()` | `DEFAULT_CHALLENGE_COMMANDS` の圧縮コマンドを直接実行する。 | 現在の `CompetitionScenario` が呼ぶ。 |
 
 ### 処理順
 
 1. `steps == nullptr` なら `CHALLENGE_RUN_RESULT_NULL_STEPS`。
-2. 文字列を先頭から読む。
-3. 空白類は無視する。
-4. `F` なら連続する `F` 数を数え、`count * CHALLENGE_STEP_FORWARD_DISTANCE_MM` だけ直進する。
-5. `B` なら連続する `B` 数を数え、`count * CHALLENGE_STEP_FORWARD_DISTANCE_MM` だけ後退する。
-6. `L` / `R` なら連続する同じ旋回文字数を数え、`count * 90` 度ぶんまとめて旋回する。
-7. 不正文字なら停止して `CHALLENGE_RUN_RESULT_INVALID_STEP`。
-8. 有効命令が1つもなければ `CHALLENGE_RUN_RESULT_EMPTY_STEPS`。
-9. 最後まで成功したら `stop_motors()` して `CHALLENGE_RUN_RESULT_OK`。
+2. 空白類を除く文字列全体が `F/B/L/R` だけか検証する。
+3. 停止後に200ms待ち、現在headingを最初の直進PID目標と絶対方位格子の原点にする。
+4. 文字列を先頭から読み、連続する同じ命令を1コマンドへまとめる。
+5. `F/B` はそれぞれの専用距離・速度へ `count` を反映して実行する。直前がBで現在がFなら、B側へ10mm低速補正し、170ms hold後、F目標へ10mmを一度だけ加え、前進最初の最大60mmを120→450deg/sで加速する。
+6. `L/R` は現在の設定では左右エンコーダ目標へ `count * 90` 度相当を旋回し、比較設定では前回の格子目標へ絶対方位旋回する。旋回を挟んだ場合はB→F反転制御を使わない。
+7. 各コマンド終了時に開始・終了エンコーダ、方位、時間、結果をリングバッファへ記録する。Bluetooth送信はログタスクが行う。
+8. 最後まで成功したら `stop_motors()` して `CHALLENGE_RUN_RESULT_OK`。
 
 ## bottle_detection/BottleDetection.h / BottleDetection.cpp
 
@@ -1087,7 +1149,7 @@ curve    = 0.38 * control_error + 0.001 * derivative
 | `drive_motor_values_t` | 左右モーターのready、カウント、速度、パワー。 |
 | `color_sensor_values_t` | カラーready、反射値、正規化反射値、RGB、HSV。 |
 | `force_sensor_values_t` | フォースready、タッチ、力N、押し込み距離mm。 |
-| `imu_values_t` | IMU ready、静止判定、加速度、角速度、heading、温度。 |
+| `imu_values_t` | IMU ready、静止判定、加速度、角速度、SPIKE側raw heading、制御用heading、独自ドリフト補正率、温度。 |
 | `all_sensor_values_t` | 上記4グループのまとめ。 |
 
 ### 内部関数
@@ -1097,7 +1159,7 @@ curve    = 0.38 * control_error + 0.001 * derivative
 | `readDriveMotorValues(values)` | 左右走行モーターのカウント、速度、パワーを読む。 |
 | `readColorSensorValues(values)` | `color_sensor_service_get_values()` からキャッシュをコピーする。 |
 | `readForceSensorValues(values)` | フォースセンサーのタッチ、力、距離を読む。 |
-| `readImuValues(values)` | IMU readyなら加速度、角速度、静止状態、heading、温度を読む。 |
+| `readImuValues(values)` | IMU readyなら加速度、角速度、静止状態、raw/control heading、独自ドリフト補正率、温度を読む。 |
 
 ### 公開関数
 
@@ -1254,9 +1316,30 @@ Bluetooth UARTの接続状態管理と文字列送信です。
 | `bluetooth_sender_send(data)` | 文字列をBluetoothへ送る。null、未ready、長さ0、256byte超は失敗。 |
 | `bluetooth_sender_send_int3(id, value1, value2)` | `id,value1,value2\n` を作って送る簡易関数。 |
 
+## logging/ChallengeCommandLogger.h / ChallengeCommandLogger.cpp
+
+難所の圧縮コマンド1回ごとの計測結果を一時保存し、既存ログタスクから非同期でBluetooth送信します。走行タスクではCSV送信を行わないため、ログ追加による命令間の待ち時間を抑えます。
+
+### 型・内部状態
+
+| 名前 | 意味 |
+| --- | --- |
+| `ChallengeCommandLogEntry` | 試走/命令番号、目標値、B→F補償、開始/終了時刻、左右エンコーダ、方位、結果を保持する。 |
+| `CHALLENGE_COMMAND_LOG_CAPACITY = 48` | 既定経路31コマンドをまとめて保持できるリングバッファ容量。 |
+| `command_log_*_index`, `command_log_count` | ログキューの読出位置、書込位置、保存件数。短いCPUロック中だけ変更する。 |
+| `command_log_dropped_count` | キュー満杯で記録できなかった累積件数。後続行の`cdrop`へ入れる。 |
+| `discardFrontEntry()` | Bluetooth送信済み、または形式不正の先頭要素をキューから取り除く。 |
+
+### 公開関数
+
+| 関数 | 処理 |
+| --- | --- |
+| `challengeCommandLoggerEnqueue(entry)` | 命令結果をリングバッファへコピーする。Bluetooth送信は行わない。満杯なら欠落件数を増やしてfalseを返す。 |
+| `challengeCommandLoggerFlush()` | 先頭から`command,...`行を送る。未接続や送信失敗時は要素を残し、次の100ms周期で再試行する。 |
+
 ## logging/SensorCsvLogger.h / SensorCsvLogger.cpp
 
-全センサー値、ライントレースデバッグ、直進PIDデバッグ、旋回デバッグをCSVとしてBluetooth送信します。
+全センサー値、ライントレースデバッグ、直進PIDデバッグ、旋回デバッグ、難所コマンド境界ログをCSVとしてBluetooth送信します。
 
 ### 内部関数/状態
 
@@ -1272,8 +1355,8 @@ Bluetooth UARTの接続状態管理と文字列送信です。
 
 | 関数 | 処理 |
 | --- | --- |
-| `sensor_csv_logger_print_header()` | 通常センサー行、旋回ログ行、直進PIDログ行のヘッダーを送る。 |
-| `sensor_csv_logger_print_row(elapsed_ms)` | `get_all_sensor_values()`、`color_detector_get_status()`、`LineTracer_GetDebug()` を読み、通常センサー行を送る。続けて必要なら直進PID行と旋回行も送る。 |
+| `sensor_csv_logger_print_header()` | 通常センサー、旋回、直進PID、難所コマンドログの各ヘッダーを送る。 |
+| `sensor_csv_logger_print_row(elapsed_ms)` | 最初に命令ログキューを送信し、その後に通常センサー行、直進PID行、旋回行を送る。送信混雑時も命令境界ログを優先する。 |
 | `sensor_csv_logger_flush()` | 現状は何もしない。BluetoothSenderは即時送信。 |
 | `run_sensor_csv_logger_seconds(seconds)` | 指定秒数だけヘッダーと行を周期送信する補助関数。 |
 
@@ -1307,7 +1390,10 @@ Bluetooth UARTの接続状態管理と文字列送信です。
 | `imucal` | IMU校正値の使用状態。`1`=Flash値、`-1`=Flash値が範囲外でfallback固定値、`-2`=Flash値読み取り失敗でfallback固定値。 |
 | `ax`, `ay`, `az` | 加速度。 |
 | `gz` | Z角速度。直進IMU補正や旋回の勢い確認に使う。 |
-| `hd` | heading。 |
+| `hd` | 走行制御が使うheading。独自補正が無効ならSPIKE側headingと同じ系統。 |
+| `rhd` | SPIKE側の3D heading。アプリ独自の時間比例補正を適用する前の値。 |
+| `hdrate` | アプリ独自補正が差し引くheadingドリフト率。単位はdeg/min。 |
+| `hdcorr` | 独自ドリフト補正設定。`0`=無効、`1`=有効。 |
 
 ### 旋回CSV列
 
@@ -1317,19 +1403,26 @@ Bluetooth UARTの接続状態管理と文字列送信です。
 | `ms` | 通常ログと同じ経過ms。 |
 | `tseq` | 旋回デバッグ更新番号。 |
 | `tact` | 旋回中なら1、最終状態なら0。 |
-| `tphase` | 1=通常旋回、2以降=停止後の精密補正回数。 |
+| `tphase` | 1=ジャイロ通常旋回、2以降=停止後の精密補正、10=難所エンコーダ主制御旋回。 |
 | `tcmd` | `turn()` に渡した角度。 |
 | `tdir` | 右=1、左=-1。 |
 | `tmax` | そのphaseで使う速度上限。 |
+| `tideal` | 停止後に最終判定する理想旋回角。通常の右90度なら90。 |
+| `tapp` | phase 1では主旋回をブレーキする機体角、phase 10では補正倍率適用後の機体角相当。現在の右90度なら68.4。 |
 | `tstart` | 旋回開始heading。 |
 | `ttgt` | 理想目標heading。 |
 | `thd` | 現在heading。 |
-| `terr` | 開始からの連続回転量で見た残り角。正なら右へ、負なら左へ追加。 |
+| `terr` | 残り機体角。phase 1/2はジャイロ連続角、phase 10はエンコーダ残量から換算する。正なら右へ、負なら左へ追加。 |
 | `tspd` | 旋回速度指令。 |
 | `tst` | 許容角内に入った連続回数。 |
 | `tres` | 結果。0=OK、1=encoder limit、2=timeout、-1=motor error。 |
-| `tenc` | 旋回開始からの左右エンコーダ移動量平均。 |
+| `tenc` | 旋回開始からの左右エンコーダ移動量平均。最終行ではcoastとブレーキ後の値。 |
+| `tetgt` | phase 10の目標エンコーダ角。 |
+| `tecut` | モーター速度指令を切った瞬間のエンコーダ角。`tenc - tecut` が停止までの惰性回転量。 |
+| `tlenc`, `trenc` | 左右個別のエンコーダ移動量。片輪の滑りや引っ掛かりを見る。 |
 | `telim` | エンコーダ安全上限。 |
+| `tls`, `trs` | 左右モーターへ渡した符号付き速度指令。右旋回では通常`tls`が正、`trs`が負。 |
+| `tesync` | 左エンコーダ移動量−右エンコーダ移動量。0に近いほどモーター軸回転量は揃っているが、タイヤの横滑り、空転、キャスター移動を含む床上軌跡の一致は保証しない。 |
 
 ### 直進PID CSV列
 
@@ -1351,6 +1444,26 @@ Bluetooth UARTの接続状態管理と文字列送信です。
 | `senc` | 直進開始からの左右エンコーダ移動量平均。 |
 | `stenc` | 目標エンコーダ移動量。 |
 
+### 難所コマンドCSV列
+
+| 列 | 意味 |
+| --- | --- |
+| `kind` | 常に`command`。 |
+| `crun`, `cseq` | 同じ起動中の試走番号と、その試走内の圧縮コマンド番号。 |
+| `ccmd`, `ccount` | `F/B/L/R`と連続数。例: `B,8`。 |
+| `ctmm` | F/Bの符号付き論理目標距離。Fは正、Bは負。旋回では0。 |
+| `ctdeg` | L/Rの符号付き目標角度。Lは負、Rは正。直進では0。 |
+| `cbf` | B→F専用制御を適用したFなら1、それ以外は0。 |
+| `cbcomp`, `cfcomp` | その命令へ適用したB側/F側の固定距離補償mm。 |
+| `cstart`, `cdur` | システム起動後の開始msと、命令に要したms。 |
+| `cmok` | 開始・終了の両方で左右モーターを取得できた場合1。 |
+| `cls`, `crs`, `cle`, `cre` | 左右エンコーダの開始値と終了値。 |
+| `cld`, `crd` | 命令中の左右エンコーダ差分。左右差の偏りや滑りを見る。 |
+| `chs`, `che`, `chd` | 開始方位、終了方位、`-180..180`度へ正規化した方位変化。 |
+| `chtgt` | 命令終了時に期待する90度格子の絶対方位。 |
+| `cres` | `challenge_run_result_t`。0なら成功。 |
+| `cdrop` | リングバッファ満杯で欠落した累積命令ログ数。通常は0。 |
+
 ## HubIMU/HubIMU.c
 
 Hub内蔵IMUを使うためのラッパーです。
@@ -1365,10 +1478,10 @@ Hub内蔵IMUを使うためのラッパーです。
 | `hub_imu_get_acceleration(accel)` | 補正済み加速度を読む。 | `calibrateMountAngle()`、ログ。 |
 | `hub_imu_get_angular_velocity(angv)` | 補正済み角速度を読む。 | ライントレースIMU補正、旋回精密補正、ログ。 |
 | `hub_imu_get_temperature()` | 現状は常に0を返す。 | 温度ログは実質未使用。 |
-| `hub_imu_get_raw_heading()` | pybricksのraw headingをそのまま返す。 | ドリフト測定の開始/終了値に使う。 |
+| `hub_imu_get_raw_heading()` | SPIKE/Pybricks側の3D headingをそのまま返す。 | 独自補正有効時のドリフト測定とCSVの `rhd` に使う。 |
 | `hub_imu_get_corrected_heading()` | raw headingから、停止中に測ったドリフト量を経過時間ぶん差し引いたheadingを返す。 | 通常の制御で使う補正済み値。 |
 | `hub_imu_clear_heading_drift_correction()` | ドリフト補正を無効化し、基準を取り直す。 | ドリフト測定前に呼ぶ。 |
-| `hub_imu_set_heading_drift_rate(drift_deg_per_min)` | 1分あたりのheadingドリフト量を設定し、以後の補正に使う。 | `calibrateRobotPoseAndDrift()` から呼ぶ。 |
+| `hub_imu_set_heading_drift_rate(drift_deg_per_min)` | 1分あたりのheadingドリフト量を設定し、以後の補正に使う。 | 独自補正設定が有効な時だけ `calibrateRobotPoseAndDrift()` から呼ぶ。 |
 | `hub_imu_get_heading_drift_rate()` | 現在設定されているドリフト補正量を返す。 | デバッグ用。単位はdeg/min。 |
 | `hub_imu_get_heading()` | 補正済みheadingを返す。 | 直進PID、旋回、ログの基準。 |
 | `hub_imu_reset_heading()` | headingを0にリセットし、ドリフト補正の基準時刻も取り直す。 | 走行開始前キャリブレーションで使う。 |
@@ -1400,7 +1513,7 @@ main_task
                  -> calibrateMountAngle
                  -> hub_imu_set_tilt
                  -> hub_imu_reset_heading
-                 -> hub_imu_set_heading_drift_rate
+                 -> hub_imu_set_heading_drift_rate（独自補正有効時のみ）
                  -> reset_straight_pid_heading
                  -> resetDriveMotorCounts
             -> wait_for_force_start
@@ -1430,13 +1543,15 @@ main_task
                       -> turn / driveUntilColor / 後退 / driveUntilBottomBlueThenBlack
             -> run_challenge_section
                  -> challenges_run_default_steps
-                      -> challenges_run_steps(DEFAULT_CHALLENGE_STEPS)
+                      -> runDefaultCommands(DEFAULT_CHALLENGE_COMMANDS)
+                           -> prepareChallengeRun
                            -> runForwardSteps
                                 -> drive_straight_mm
                            -> runBackwardSteps
                                 -> drive_straight_mm(negative distance)
                            -> runTurnSteps
-                                -> turn
+                                -> turn_by_encoder (現在の設定)
+                                -> turn_to_heading (比較設定)
             -> showHeadingResult('H', hub_imu_get_heading())
             -> run_bottle_push_section
             -> run_goal_section
@@ -1444,7 +1559,7 @@ main_task
 
 `app.cpp` は `competition_scenario_run()` を呼ぶだけで、現在の実行ループは `CompetitionScenario.cpp` にあります。
 フォースセンサーを押して離すたびに姿勢を取り直し、ボトル検知/色検知/難所ステップを1回実行します。
-`F` は前進、`B` は後退、`L` は左90度、`R` は右90度です。連続した同じ文字はまとめて1回の走行/旋回にします。
+`F` は前進、`B` は後退、`L` は左90度、`R` は右90度です。連続した同じ文字はまとめて1回の走行/旋回にします。難所の旋回目標は開始時方位を原点とする90度格子なので、各旋回の停止誤差は次の目標へ足されません。
 
 ### 残してある直進+旋回テスト
 
@@ -1475,7 +1590,7 @@ CompetitionScenario
   -> wait_for_force_start
   -> calibrateRobotPoseAndDrift
        -> calibrate_robot_pose
-       -> hub_imu_set_heading_drift_rate
+       -> hub_imu_set_heading_drift_rate（独自補正有効時のみ）
   -> wait_for_force_start
   -> runBottleColorCheckpoint
        -> run_line_trace_to_bottle_section
@@ -1539,6 +1654,17 @@ robot_sensor_task
 
 ## 調整時の見方
 
+### 難所のどこから誤差が増えるか
+
+`kind=command`の行だけを抽出し、`crun`ごとに`cseq`順で比較します。同じ命令を複数回試走し、次の見方で原因を切り分けます。
+
+- `R/L`の`chd`が`ctdeg`から毎回同じ方向へ外れる: 旋回倍率、減速、惰性停止に系統誤差がある。
+- `R/L`の`cld/crd`は再現するが`chd`だけ変動する: ジャイロのドリフトまたはノイズの影響が大きい。
+- `F/B`の`cld`と`crd`の差が後半ほど増える: 左右モーター、タイヤ、床摩擦による直進偏差が蓄積している。
+- `cbf=1`だけ`cdur`や`cld/crd`が大きく変動する: 反転補償、hold、緩加速の再調整が必要。
+- `che`と次行の`chs`が大きく異なる: 命令間で機体が動いているか、計測外の処理が姿勢へ影響している。
+- `cdrop`が0以外: ログキューが満杯で比較データが欠けている。Bluetooth接続と送信負荷を先に確認する。
+
 ### 直進がふらつく
 
 見るログ列は通常行の `hd`, `gz`, `lc/rc`, `ls/rs` と、`straight` 行の `stgt`, `shd`, `serr`, `scorr`, `sleft/sright`, `slim` です。
@@ -1549,12 +1675,39 @@ robot_sensor_task
 - 旋回直後だけ揺れる: `slim`、`STRAIGHT_START_SPEED_LIMIT_*`、`STRAIGHT_PID_CORRECTION_RAMP_CYCLES` を見る。
 - `KI` は最後の手段。常に同じ方向に残る誤差がある時だけ小さく入れる。
 
+### 後退距離が短い/長い
+
+`F`と`B`は独立設定です。`B`を1回以上走らせ、指令した合計距離と床上の実測距離から次を計算します。
+
+```text
+新しいCHALLENGE_STEP_BACKWARD_DISTANCE_MM
+  = 現在値 * 目標距離 / 実測距離
+```
+
+例えば、`B8`の目標1040mmに対して実測960mmなら、`130 * 1040 / 960 = 140.8`なので、まず141mmを試します。距離だけの影響を見る時は `CHALLENGE_STEP_BACKWARD_SPEED_DEG_S` を500のままにし、同じ床・電池条件で複数回比較します。
+
+`B`単独では正しく、`BF`の時だけ後退端が浅い場合は、全Bへ効く距離設定を増やしません。現在80mmの`CHALLENGE_BACKWARD_TO_FORWARD_BACKWARD_COMPENSATION_MM`だけを5〜10mmずつ増やします。Bの後退端は合うがFだけ短い場合は、現在80mmの`CHALLENGE_BACKWARD_TO_FORWARD_FORWARD_COMPENSATION_MM`だけを同じ刻みで増やします。反対に長くなった側は、その側の補償だけ減らします。
+
+固定距離が合った後も前進開始で車体が揺り戻す場合はhold時間、タイヤが滑る場合は前進加速距離を調整します。固定距離補償は`B→F`反転1回につき一度だけなので、連続B/Fの文字数には比例しません。
+
 ### 旋回が遅い/止まる/行き過ぎる
 
-見るログ列は `turn` 行の `tphase`, `terr`, `tspd`, `tenc`, `tres` と、通常行の `gz`, `hd` です。
+見るログ列は `turn` 行の `tphase`, `terr`, `tspd`, `tenc`, `tetgt`, `tecut`, `tlenc`, `trenc`, `tls`, `trs`, `tesync`, `tres` と、通常行の `gz`, `hd` です。`file:///Users/x24066xx/pybricks-ble-monitor-main/index.html` はこのCSVをそのまま受信でき、Chrome/Edgeではストリーミング保存もできます。
+
+同期補正導入前の2試走では、31命令を欠落なく実行し、直進・後退エンコーダ量の試走間平均差は0.48%でした。一方、右旋回13回の平均実機角は87.48度と87.00度、最終格子方位誤差は約-43度、左右輪差から見積もった旋回中の中心移動は71.35mmと67.20mmでした。この再現性から、直進距離よりも右旋回不足と左右輪不均衡を先に補正します。
+
+左右同期導入後、倍率0.76で開始加速を使わなかった2ログでは、完了が記録された24旋回の平均が90.01度でした。終了時の左右差は平均約2エンコーダ度まで減りましたが、開始途中では33〜44度の差が残ります。現在は実走で確認した右過旋回を抑えるため倍率を0.738へ調整しており、開始加速なしの状態で単独評価します。
+
+開始60エンコーダ度の低速加速も試しましたが、途中の左右差平均は38.23度から29.31度へ減った一方、旋回平均92.22度、最大101.53度、最終格子方位誤差+19.34度となり、実走経路も大きく悪化しました。低速域で床摩擦、横滑り、キャスター姿勢の影響が強く出たと判断し、この加速制御は無効化しています。`tesync`だけを良化指標にせず、実機角と床上の到達位置を優先します。
 
 - `tphase=1` が長い: 通常旋回速度、`TURN_PID_*`、`TURN_APPROACH_TOLERANCE_DEG` を見る。
-- `tphase=2以降` が長い: 精密補正が詰まっている。`TURN_SETTLED_CORRECTION_SPEED_DEG_S`、`TURN_FINE_CORRECTION_MIN_SPEED_DEG_S`、`TURN_FINE_COAST_*` を見る。
+- `tphase=2` が出る: 通常停止後も誤差が3度を超えたため、1回だけ停止後補正を行っている。速度、最低速度、`TURN_FINE_COAST_*` を見る。
+- `tphase=10` で `tenc - tecut` が大きい: coast中の惰性が過旋回の主因。最低速度を下げるか、減速区間を広げる。
+- `tphase=10` で `tecut` 自体が大きい: 制御周期をまたいで目標を超えている。終端速度を下げる。
+- 最終行の `tesync` が同じ符号で大きく残る: 同期補正が不足している。まずゲインを0.8から1.0、または上限を40から50deg/sへ片方ずつ上げる。
+- 走行中の `tesync` が正負へ細かく反転する: 同期補正が強い。ゲインを0.8から0.6へ下げる。
+- `tlenc` と `trenc` が揃っても実機が横移動する: タイヤ径差、接地荷重、床摩擦差の影響が残るため、左右別の目標倍率または速度フィードフォワードを検討する。
+- 停止後の実機角だけが大きく `tenc` は再現する: `CHALLENGE_ENCODER_RIGHT_TURN_SCALE` を0.01から0.02刻みで下げる。過小旋回なら上げる。
 - `terr` が `+` と `-` に大きく振れる: 精密補正が強すぎるか、角速度が残っている。速度を下げるか、早めブレーキ条件を強くする。
 - `tres=1`: エンコーダ安全上限。機械的に動きすぎ、またはIMUが追えていない。
 - `tres=2`: タイムアウト。`terr` が許容内に入らなかった。
