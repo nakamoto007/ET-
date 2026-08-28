@@ -57,7 +57,7 @@ jobs:
             git config --global --add safe.directory \* 
             ./scripts/build-samples.sh
       - name: Upload
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: TestApp
           path: |
