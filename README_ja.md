@@ -39,6 +39,8 @@ For English document please see [README.md](README.md).
   - [ドキュメント](https://shimojima.github.io/spike-rt/ja/html/topics.html) を参照．
 
 ## 使い方
+このチームでの初回セットアップ，ビルド，Hubへの書き込み手順は [TEAM_MEMBER_GUIDE.md](TEAM_MEMBER_GUIDE.md) を参照．
+
 アプリケーションの開発方法などの詳細については，[docs/ja/](docs/ja/) を参照．
 - [開発環境の構築](docs/ja/Env.md)
 - [アプリケーションの開発方法](docs/ja/DevelopApp.md)

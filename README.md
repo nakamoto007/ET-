@@ -40,6 +40,8 @@ An RTOS-based software platform for [LEGO® Education SPIKE™ Prime](https://ed
   - See [the document](https://shimojima.github.io/spike-rt/en/html/topics.html)
 
 ## Usage
+For this team's setup, build, and upload steps, see [TEAM_MEMBER_GUIDE.md](TEAM_MEMBER_GUIDE.md).
+
 For more information, see [docs/ja/](docs/ja/).
 
 ## Contribution

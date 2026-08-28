@@ -1,7 +1,11 @@
 #!/bin/bash
 HERE=$( cd "$( dirname "$0" )" && pwd -P )
 
-if command -v python.exe > /dev/null 2>&1; then
+if [ -n "${PYTHON3:-}" ]; then
+  :
+elif [ -n "${ETROBO_SPIKE_RT_TOOLS:-}" ] && [ -x "$ETROBO_SPIKE_RT_TOOLS/python/bin/python3" ]; then
+  PYTHON3="$ETROBO_SPIKE_RT_TOOLS/python/bin/python3"
+elif command -v python.exe > /dev/null 2>&1; then
   PYTHON3=python.exe
 else
   PYTHON3=python3

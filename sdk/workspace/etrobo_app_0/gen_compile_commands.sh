@@ -2,10 +2,22 @@
 set -eu
 
 APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-ETROBO_ROOT="$(cd "$APP_DIR/../../../.." && pwd -P)"
-SPIKE_RT_DIR="$ETROBO_ROOT/spike-rt"
-WORKSPACE_DIR="$ETROBO_ROOT/workspace"
-TOOLCHAIN_DIR="$ETROBO_ROOT/gcc-arm-none-eabi-10.3-2021.10/bin"
+SPIKE_RT_ROOT="$(cd "$APP_DIR/../../.." && pwd -P)"
+ETROBO_ROOT="$(cd "$SPIKE_RT_ROOT/.." && pwd -P)"
+WORKSPACE_DIR="$SPIKE_RT_ROOT/sdk/workspace"
+
+if [ -n "${ETROBO_TARGET_GCC:-}" ]; then
+  if [ -d "$ETROBO_TARGET_GCC/bin" ]; then
+    TOOLCHAIN_DIR="$ETROBO_TARGET_GCC/bin"
+  else
+    TOOLCHAIN_DIR="$ETROBO_TARGET_GCC"
+  fi
+else
+  TOOLCHAIN_DIR="$ETROBO_ROOT/gcc-arm-none-eabi-10.3-2021.10/bin"
+  if [ ! -d "$TOOLCHAIN_DIR" ]; then
+    TOOLCHAIN_DIR="$SPIKE_RT_ROOT/gcc-arm-none-eabi-10.3-2021.10/bin"
+  fi
+fi
 
 emit_entry() {
   local compiler="$1"
@@ -27,23 +39,23 @@ emit_entry() {
       "-Wall",
       "-DSPIKERT",
       "-I$APP_DIR/build",
-      "-I$SPIKE_RT_DIR/asp3/include",
-      "-I$SPIKE_RT_DIR/asp3",
-      "-I$SPIKE_RT_DIR/asp3/target/primehub_gcc",
-      "-I$SPIKE_RT_DIR/asp3/target/primehub_gcc/stm32fcube",
-      "-I$SPIKE_RT_DIR/asp3/arch/arm_m_gcc/stm32f4xx_stm32cube",
-      "-I$SPIKE_RT_DIR/asp3/arch/arm_m_gcc/stm32f4xx_stm32cube/STM32F4xx_HAL_Driver/Inc",
-      "-I$SPIKE_RT_DIR/asp3/arch/arm_m_gcc/stm32f4xx_stm32cube/CMSIS/Device/ST/STM32F4xx/Include",
-      "-I$SPIKE_RT_DIR/asp3/arch/arm_m_gcc/stm32f4xx_stm32cube/CMSIS/Include",
-      "-I$SPIKE_RT_DIR/asp3/arch/gcc",
-      "-I$SPIKE_RT_DIR/drivers",
-      "-I$SPIKE_RT_DIR/drivers/spike",
-      "-I$SPIKE_RT_DIR/drivers/include",
-      "-I$SPIKE_RT_DIR/drivers/libcpp",
-      "-I$SPIKE_RT_DIR/drivers/libcpp/spike",
-      "-I$SPIKE_RT_DIR/external/libpybricks/lib/pbio/include",
-      "-I$SPIKE_RT_DIR/external/libpybricks/lib/lego",
-      "-I$SPIKE_RT_DIR/external/libpybricks/lib/pbio/platform/prime_hub_spike-rt",
+      "-I$SPIKE_RT_ROOT/asp3/include",
+      "-I$SPIKE_RT_ROOT/asp3",
+      "-I$SPIKE_RT_ROOT/asp3/target/primehub_gcc",
+      "-I$SPIKE_RT_ROOT/asp3/target/primehub_gcc/stm32fcube",
+      "-I$SPIKE_RT_ROOT/asp3/arch/arm_m_gcc/stm32f4xx_stm32cube",
+      "-I$SPIKE_RT_ROOT/asp3/arch/arm_m_gcc/stm32f4xx_stm32cube/STM32F4xx_HAL_Driver/Inc",
+      "-I$SPIKE_RT_ROOT/asp3/arch/arm_m_gcc/stm32f4xx_stm32cube/CMSIS/Device/ST/STM32F4xx/Include",
+      "-I$SPIKE_RT_ROOT/asp3/arch/arm_m_gcc/stm32f4xx_stm32cube/CMSIS/Include",
+      "-I$SPIKE_RT_ROOT/asp3/arch/gcc",
+      "-I$SPIKE_RT_ROOT/drivers",
+      "-I$SPIKE_RT_ROOT/drivers/spike",
+      "-I$SPIKE_RT_ROOT/drivers/include",
+      "-I$SPIKE_RT_ROOT/drivers/libcpp",
+      "-I$SPIKE_RT_ROOT/drivers/libcpp/spike",
+      "-I$SPIKE_RT_ROOT/external/libpybricks/lib/pbio/include",
+      "-I$SPIKE_RT_ROOT/external/libpybricks/lib/lego",
+      "-I$SPIKE_RT_ROOT/external/libpybricks/lib/pbio/platform/prime_hub_spike-rt",
       "-I$APP_DIR",
       "-I$APP_DIR/config",
       "-I$APP_DIR/control",
@@ -53,10 +65,10 @@ emit_entry() {
       "-I$APP_DIR/logging",
       "-I$APP_DIR/sensors",
       "-I$WORKSPACE_DIR",
-      "-I$SPIKE_RT_DIR/asp3/tecsgen",
-      "-I$SPIKE_RT_DIR/asp3/tecs_kernel",
-      "-I$SPIKE_RT_DIR/sdk/common/compat",
-      "-I$SPIKE_RT_DIR/asp3/arch/arm_m_gcc/common",
+      "-I$SPIKE_RT_ROOT/asp3/tecsgen",
+      "-I$SPIKE_RT_ROOT/asp3/tecs_kernel",
+      "-I$SPIKE_RT_ROOT/sdk/common/compat",
+      "-I$SPIKE_RT_ROOT/asp3/arch/arm_m_gcc/common",
       "-c",
       "$source",
       "-o",

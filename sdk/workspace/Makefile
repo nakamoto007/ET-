@@ -46,7 +46,7 @@ BUILDDIR := $(APPLDIRS)/build
 #
 # Target for an application (static)
 #
-JOB_NUM = ${JOB_NUM:-$(nproc)} 
+JOB_NUM ?= $(shell getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2)
 
 include $(APPLDIRS)/Makefile.inc
 

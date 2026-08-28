@@ -6,6 +6,7 @@
 
 ```sh
 cd <repo-root>
+make setup
 make
 make up
 ```
@@ -18,18 +19,55 @@ make upload
 
 ## ビルド
 
+初回clone後、またはsubmoduleが空の場合はrepo直下で先に実行する。
+
+```sh
+make setup
+```
+
+このrepoでは `git submodule update --init --recursive` を使わない。
+`external/libpybricks/micropython/lib/btstack` まで初期化されると、SPIKE-RT側のbtstackと混ざってビルドが失敗する。
+すでに実行した場合も `make setup` で戻せる。
+
 おすすめ:
 
 ```sh
-cd <etrobo-root>/workspace/etrobo_app_0
+cd <repo-root>/sdk/workspace/etrobo_app_0
 make
 ```
 
 SDKのworkspaceから直接実行する場合:
 
 ```sh
-cd <etrobo-root>/workspace
+cd <repo-root>/sdk/workspace
 make -C etrobo_app_0 build
+```
+
+`arm-none-eabi-g++ was not found` が出る場合は、ツールチェーンの場所をそのコマンドだけに指定する。
+`ETROBO_TARGET_GCC` には `gcc-arm-none-eabi-10.3-2021.10` のフォルダ本体を指定する。
+`bin` 直指定でも動くが、フォルダ本体指定を基本にする。
+`/path/to/...` は仮の例なので、そのまま実行せず、実際に展開した場所に置き換える。
+
+```sh
+ETROBO_TARGET_GCC=/path/to/gcc-arm-none-eabi-10.3-2021.10 make
+```
+
+例: `ET-` と同じ `GitHub` フォルダに置いた場合:
+
+```sh
+ETROBO_TARGET_GCC="$HOME/GitHub/gcc-arm-none-eabi-10.3-2021.10" make
+```
+
+環境確認だけしたい場合:
+
+```sh
+make doctor
+```
+
+書き込みまで使うPCでは、PythonのUSB依存も入れる。
+
+```sh
+make setup-upload
 ```
 
 ビルド成功の目印:
@@ -41,10 +79,10 @@ configuration check passed
 生成物:
 
 ```text
-<etrobo-root>/spike-rt/sdk/workspace/asp.bin
+<repo-root>/sdk/workspace/asp.bin
 ```
 
-`Makefile` は自分の配置場所から `<etrobo-root>` とアプリ名を自動で計算するので、別PCへ移動しても中身を書き換える必要はない。
+`Makefile` は自分の配置場所からrepo rootとアプリ名を自動で計算するので、別PCへ移動しても中身を書き換える必要はない。
 
 ## SPIKE HubをDFUモードにする
 
@@ -56,7 +94,7 @@ configuration check passed
 DFUモード確認:
 
 ```sh
-cd <etrobo-root>/workspace/etrobo_app_0
+cd <repo-root>/sdk/workspace/etrobo_app_0
 make device
 ```
 
@@ -73,7 +111,7 @@ HubがDFUモードになっていることを確認してから実行する。
 おすすめ:
 
 ```sh
-cd <etrobo-root>/workspace/etrobo_app_0
+cd <repo-root>/sdk/workspace/etrobo_app_0
 make up
 ```
 
@@ -82,7 +120,7 @@ make up
 SDKのworkspaceから直接実行する場合は、初回だけでなく毎回ビルドも一緒に実行する。
 
 ```sh
-cd <etrobo-root>/workspace
+cd <repo-root>/sdk/workspace
 make -C etrobo_app_0 up
 ```
 
@@ -91,7 +129,7 @@ make -C etrobo_app_0 up
 Hubを先にDFUモードにしてから実行する。
 
 ```sh
-cd <etrobo-root>/workspace/etrobo_app_0
+cd <repo-root>/sdk/workspace/etrobo_app_0
 make up
 ```
 
@@ -109,14 +147,14 @@ make: *** No rule to make target `/Makefile.inc'.  Stop.
 直し方:
 
 ```sh
-cd <etrobo-root>/workspace/etrobo_app_0
+cd <repo-root>/sdk/workspace/etrobo_app_0
 make up
 ```
 
 または:
 
 ```sh
-cd <etrobo-root>/workspace
+cd <repo-root>/sdk/workspace
 make -C etrobo_app_0 up
 ```
 
@@ -140,7 +178,7 @@ make: *** [upload] Error 1
 切り分けの基本:
 
 ```sh
-cd <etrobo-root>/workspace/etrobo_app_0
+cd <repo-root>/sdk/workspace/etrobo_app_0
 make
 make device
 make upload
@@ -153,14 +191,16 @@ make upload
 (VS Codeの認識範囲の問題で発生している警告用なので、`compile_commands.json` がなくてもコンパイル自体はできます)
 
 ```sh
-cd <etrobo-root>/workspace/etrobo_app_0
+cd <repo-root>/sdk/workspace/etrobo_app_0
 bash gen_compile_commands.sh
 ```
 
-VS Codeで `workspace/etrobo_app_0` を開く場合は `.vscode/c_cpp_properties.json` を使う。
-`compilerPath` は `arm-none-eabi-g++` にしてあるので、IntelliSenseでコンパイラが見つからない場合は、先に次を実行してからVS Codeを起動する。
+VS Codeで `sdk/workspace/etrobo_app_0` を開く場合は、C/C++拡張に `compile_commands.json` を参照させる。
+IntelliSenseでコンパイラが見つからない場合は、先にツールチェーンを指定して `compile_commands.json` を再生成する。
+`/path/to/...` は実際に展開した場所に置き換える。
 
 ```sh
-cd <etrobo-root>/workspace
-code etrobo_app_0
+cd <repo-root>/sdk/workspace/etrobo_app_0
+ETROBO_TARGET_GCC=/path/to/gcc-arm-none-eabi-10.3-2021.10 bash gen_compile_commands.sh
+code .
 ```

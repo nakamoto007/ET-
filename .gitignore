@@ -2,6 +2,7 @@ tags
 
 build/
 **/build-doxygen/
+gcc-arm-none-eabi-10.3-2021.10
 
 # Ignore backup script in sdk/common
 sdk/common/deploy-dfu.sh.bak
