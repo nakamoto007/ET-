@@ -29,38 +29,24 @@ jobs:
           push: false
           cache-from: type=gha,scope=slim
           cache-to: type=gha,mode=max,scope=slim
-      - name: Build test(QEMU)
-        uses: addnab/docker-run-action@v3
-        with:
-          image: spike-rt:slim
-          options: -v ${{ github.workspace }}:/work -w /work
-          run: |
-            # Avoid a git error saying "fatal: detected dubious ownership in repository at ..."
-            git config --global --add safe.directory \* 
-            ./scripts/build-test-qemu.sh
-      - name: Build test
-        uses: addnab/docker-run-action@v3
-        with:
-          image: spike-rt:slim
-          options: -v ${{ github.workspace }}:/work -w /work
-          run: |
-            # Avoid a git error saying "fatal: detected dubious ownership in repository at ..."
-            git config --global --add safe.directory \* 
-            ./scripts/build-test.sh
-      - name: Build all sample applications
-        uses: addnab/docker-run-action@v3
-        with:
-          image: spike-rt:slim
-          options: -v ${{ github.workspace }}:/work -w /work
-          run: |
-            # Avoid a git error saying "fatal: detected dubious ownership in repository at ..."
-            git config --global --add safe.directory \* 
-            ./scripts/build-samples.sh
+      - name: Build default application
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}:/work" \
+            -w /work \
+            spike-rt:slim \
+            bash -lc '
+              git config --global --add safe.directory /work
+              make setup
+              make
+            '
       - name: Upload
         uses: actions/upload-artifact@v7
         with:
-          name: TestApp
+          name: etrobo_nao
+          if-no-files-found: error
           path: |
-            build/obj-primehub_test/asp
-            build/obj-primehub_test/asp.bin
-            build/obj-primehub_test/asp.syms
+            sdk/workspace/asp.bin
+            sdk/workspace/etrobo_nao/build/asp
+            sdk/workspace/etrobo_nao/build/asp.bin
+            sdk/workspace/etrobo_nao/build/asp.syms
