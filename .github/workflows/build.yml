@@ -35,8 +35,11 @@ jobs:
             -v "${{ github.workspace }}:/work" \
             -w /work \
             spike-rt:slim \
-            bash -lc '
-              git config --global --add safe.directory /work
+            bash -c '
+              set -euo pipefail
+              export PATH="/usr/local/gcc-arm-none-eabi/bin:${PATH}"
+              git config --global --add safe.directory "*"
+              arm-none-eabi-g++ --version
               make setup
               make
             '
