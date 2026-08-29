@@ -37,7 +37,8 @@ jobs:
             spike-rt:slim \
             bash -c '
               set -euo pipefail
-              export PATH="/usr/local/gcc-arm-none-eabi/bin:${PATH}"
+              export ETROBO_TARGET_GCC="/usr/local/gcc-arm-none-eabi"
+              export PATH="${ETROBO_TARGET_GCC}/bin:${PATH}"
               git config --global --add safe.directory "*"
               arm-none-eabi-g++ --version
               make setup
