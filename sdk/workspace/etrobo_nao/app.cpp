@@ -168,5 +168,6 @@ void main_task(intptr_t unused)
   } else {
     competition_scenario_run();
   }
+  
   ext_tsk();
 }

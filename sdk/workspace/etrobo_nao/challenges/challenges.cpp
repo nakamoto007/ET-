@@ -9,7 +9,7 @@
 namespace {
 
 const char DEFAULT_CHALLENGE_STEPS[] =
-  "FFFFFFRBBBBBBBBRBFRBBBBBBBFFFRFFRBBBBRFFRBBBBBBBFFFRFFRBBBBRFFRBBBBBBBFFFRFFRBBBBBB";
+  "FFFFFFFFF";
 
 bool isIgnoredStep(char step)
 {
@@ -144,6 +144,9 @@ challenge_run_result_t challenges_run_steps(const char *steps)
         return result;
       }
       index += turn_count;
+      continue;
+    }
+    if (step == 'C') {
       continue;
     }
 

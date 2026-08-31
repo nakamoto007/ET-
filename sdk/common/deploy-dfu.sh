@@ -1,4 +1,6 @@
 #!/bin/bash
+set -euo pipefail
+
 HERE=$( cd "$( dirname "$0" )" && pwd -P )
 
 if [ -n "${PYTHON3:-}" ]; then
@@ -19,11 +21,20 @@ TEXT0_ADDR=0x8008000
 DFU_VID=0x0694
 DFU_PID=0x0008
 
+if [ $# -ne 1 ]; then
+  echo "Usage: $0 <asp.bin>" >&2
+  exit 2
+fi
+
+if [ ! -f "$1" ]; then
+  echo "$1 was not found" >&2
+  exit 2
+fi
+
+trap 'rm -f firmware.dfu' EXIT
 
 echo "DFU Create $1"
 $PYTHON3 $DFU -b $TEXT0_ADDR:$1 firmware.dfu
 
 echo "Writing $1 to the board"
 $PYTHON3 $PYDFU -u firmware.dfu --vid $DFU_VID --pid $DFU_PID
-
-rm -rf firmware.dfu

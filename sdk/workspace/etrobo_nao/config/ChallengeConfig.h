@@ -10,7 +10,7 @@ const bool RUN_CHALLENGE_ONLY_TEST = true;
 // 難所攻略のステップ文字列で、F 1文字が表す前進距離 [mm]。
 const int CHALLENGE_STEP_FORWARD_DISTANCE_MM = 125;
 // 難所攻略のステップ文字列で、F を走る時の速度 [deg/s]。
-const int CHALLENGE_STEP_FORWARD_SPEED_DEG_S = 800;
+const int CHALLENGE_STEP_FORWARD_SPEED_DEG_S = 900;
 // 難所ステップ走行の開始速度 [deg/s]。
 const int CHALLENGE_STEP_START_SPEED_DEG_S = 300;
 // 難所ステップ走行の加速に使う距離 [mm]。
